@@ -471,25 +471,28 @@ class CrawlerEngine:
                 # the same request once at TLS strength instead: same object, same queue slot,
                 # no re-scheduling. One hop only — TLS failing goes back to the retry engine.
                 fell_back = False
-                if level is FetchLevel.BROWSER and getattr(self.spider, "browser_fallback_to_static", True):
+                if level is FetchLevel.BROWSER:
+                    # A browser failure is a failure whether or not the fallback can rescue it,
+                    # so it is counted outside the switch. Only the rescue is conditional.
                     if self._metrics is not None:
                         self._metrics.counter("scrapling_browser_failures_total").inc(exc=type(e).__name__)
-                    # The browser's proxy was just released as a failure; the TLS session
-                    # carries its own identity and must not inherit a dead lease.
-                    request._session_kwargs.pop("proxy", None)
-                    request._session_kwargs.pop("proxies", None)
-                    proxy_url = None
-                    request.sid = self.session_manager.ensure_domain_session(domain, FetchLevel.TLS)
-                    try:
-                        started_at = anyio.current_time()
-                        response = await self.session_manager.fetch(request)
-                        latency = anyio.current_time() - started_at
-                        fell_back = True
-                    except Exception as fallback_error:
-                        e = fallback_error
-                        log.warning(
-                            "TLS fallback failed too: url=%s exc=%s", request.url, type(fallback_error).__name__
-                        )
+                    if getattr(self.spider, "browser_fallback_to_static", True):
+                        # The browser's proxy was just released as a failure; the TLS session
+                        # carries its own identity and must not inherit a dead lease.
+                        request._session_kwargs.pop("proxy", None)
+                        request._session_kwargs.pop("proxies", None)
+                        proxy_url = None
+                        request.sid = self.session_manager.ensure_domain_session(domain, FetchLevel.TLS)
+                        try:
+                            started_at = anyio.current_time()
+                            response = await self.session_manager.fetch(request)
+                            latency = anyio.current_time() - started_at
+                            fell_back = True
+                        except Exception as fallback_error:
+                            e = fallback_error
+                            log.warning(
+                                "TLS fallback failed too: url=%s exc=%s", request.url, type(fallback_error).__name__
+                            )
 
                 if fell_back:
                     log.info("browser fell back to TLS: url=%s exc=%s", request.url, type(e).__name__)
@@ -502,6 +505,11 @@ class CrawlerEngine:
                         self._metrics.counter("scrapling_requests_total").inc(status=str(response.status))
                         self._metrics.histogram("scrapling_request_duration_seconds").observe(
                             latency, level=FetchLevel.TLS.name
+                        )
+                        # The gauge is read as "where this domain is now": after a rescue, that is
+                        # the rung that served the page, not the one that failed.
+                        self._metrics.gauge("scrapling_ladder_level").set(
+                            float(FetchLevel.TLS), domain=domain
                         )
                     if self._adaptive_engine is not None:
                         signal = detect_signal(response)

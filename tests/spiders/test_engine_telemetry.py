@@ -408,3 +408,47 @@ async def test_non_browser_failure_counts_one_error():
     requests_total = engine._metrics.get("scrapling_requests_total").snapshot()["scrapling_requests_total"]
     assert requests_total == {'status="error"': 1.0}, requests_total
     assert engine._metrics.get("scrapling_browser_failures_total").snapshot()["scrapling_browser_failures_total"] == {}
+
+@pytest.mark.asyncio
+async def test_ladder_level_reflects_served_level_after_fallback():
+    """The gauge must end on the rung that served the page, not the one that failed."""
+    spider = _Spider()
+    spider.browser_fallback_to_static = True
+    engine = _engine(spider, _Session())
+    engine._per_domain_sessions = True
+    engine._adaptive_engine = _Plan({"example.com": FetchLevel.BROWSER.value})
+    engine.session_manager.fetch = _Session(TimeoutError("page.goto"), _Response(status=200)).fetch
+
+    await _run(engine)
+
+    gauge = engine._metrics.get("scrapling_ladder_level")
+    assert gauge.value(domain="example.com") == float(FetchLevel.TLS) == 2.0
+    assert gauge.value(domain="example.com") != float(FetchLevel.BROWSER)
+
+
+@pytest.mark.asyncio
+async def test_ladder_level_unchanged_without_fallback():
+    """No fallback, no gauge write beyond the entry level."""
+    engine = _engine(_Spider(), _Session(_Response(status=200)))
+
+    await _run(engine)
+
+    assert engine._metrics.get("scrapling_ladder_level").value(domain="example.com") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_browser_failures_counted_when_fallback_disabled():
+    """With the switch off nothing rescues a browser failure, but the failure is still visible."""
+    spider = _Spider()
+    spider.browser_fallback_to_static = False
+    engine = _engine(spider, _Session())
+    engine._per_domain_sessions = True
+    engine._adaptive_engine = _Plan({"example.com": FetchLevel.BROWSER.value})
+    engine.session_manager.fetch = _Session(TimeoutError("page.goto")).fetch
+
+    await _run(engine)
+
+    assert engine._metrics.get("scrapling_browser_failures_total").value(exc="TimeoutError") == 1
+    assert engine._metrics.get("scrapling_requests_total").snapshot()["scrapling_requests_total"] == {'status="error"': 1.0}
+    durations = engine._metrics.get("scrapling_request_duration_seconds").snapshot()["scrapling_request_duration_seconds"]
+    assert not any('level="TLS"' in key for key in durations), durations
