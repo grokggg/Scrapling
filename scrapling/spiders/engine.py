@@ -19,6 +19,7 @@ from scrapling.spiders.adaptive import AdaptiveEngine, FetchLevel
 from scrapling.spiders.presets import ENGINEERING_PRESET
 from scrapling.spiders.signals import BlockSignal, detect_signal
 from scrapling.spiders.session import STATIC_DEFAULT_SID, FINGERPRINT_POOL
+from scrapling.spiders.pacing import PacingController
 from scrapling.spiders.proxy_pool import ProxyPool, ProxyPoolConfig
 from scrapling.spiders.cache import ResponseCacheManager
 from scrapling.spiders.checkpoint import CheckpointManager, CheckpointData
@@ -62,6 +63,11 @@ class CrawlerEngine:
         self.session_manager.fingerprint_pool = getattr(self.spider, "fingerprint_pool", FINGERPRINT_POOL)
         # Proxy pool is opt-in: without it the PROXY rung falls back to TLS.
         self._proxy_pool: Optional[ProxyPool] = getattr(self.spider, "proxy_pool", None)
+        # Pacing is opt-in: a spider that never asked for it pays nothing, not even a draw.
+        pacing_config = getattr(self.spider, "pacing_config", None)
+        self._pacing: Optional[PacingController] = (
+            PacingController(pacing_config) if pacing_config is not None else None
+        )
 
         if self.spider.robots_txt_obey:
 
@@ -316,6 +322,10 @@ class CrawlerEngine:
             if self._autothrottle:
                 delay = self._autothrottle.delay_for(request.domain, floor)
 
+            if self._pacing is not None:
+                # Both numbers are "at least this long", so the more conservative one wins.
+                delay = max(delay, self._pacing.next_delay(request.domain or ""))
+
             if delay:
                 await anyio.sleep(delay)
 
@@ -355,6 +365,20 @@ class CrawlerEngine:
                 self.stats.increment_requests_count(request.sid or self.session_manager.default_session_id)
                 self.stats.increment_response_bytes(request.domain, len(response.body))
                 self.stats.increment_status(response.status)
+
+                # Rhythm bookkeeping: a completed request may be the one that retires the
+                # session. The reset only drops sessions — the adaptive ladder keeps its
+                # risk, so the next request resumes at the same rung on a fresh identity.
+                if self._pacing is not None:
+                    self._pacing.record_request(domain)
+                    if self._pacing.should_rotate(domain):
+                        await self.session_manager.reset_domain(domain)
+                        self._pacing.mark_rotated(domain)
+                        pause = self._pacing.config.for_domain(domain).rotate_pause
+                        log.info("session rotated: domain=%s", domain)
+                        # A new identity should not open with a burst: let the old one go quiet.
+                        if pause > 0:
+                            await anyio.sleep(pause)
 
             except Exception as e:
                 if proxy_url is not None:

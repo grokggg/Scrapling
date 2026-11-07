@@ -123,15 +123,16 @@ class TestAptSpider:
         assert apt.retry_policy.no_retry_on_status == frozenset({404, 410})
 
     def test_apt_spider_fingerprint_pool_is_wider_than_the_default(self):
+        from scrapling.spiders.fingerprint import DEFAULT_FINGERPRINTS, FingerprintPool
         from scrapling.spiders.presets import make_apt_spider
-        from scrapling.spiders.session import FINGERPRINT_POOL
         from scrapling.spiders.spider import Spider
 
         pool = make_apt_spider(Spider).fingerprint_pool
 
-        assert len(pool) >= 14
-        assert len(pool) > len(FINGERPRINT_POOL)
-        assert set(FINGERPRINT_POOL) <= set(pool)
+        assert isinstance(pool, FingerprintPool)
+        assert len(pool) == 8 and len(pool) > len(DEFAULT_FINGERPRINTS)
+        assert {fp.name for fp in DEFAULT_FINGERPRINTS} <= set(pool.all_names())
+        assert len({pool.get(name).impersonate for name in pool.all_names()}) >= 4
 
     def test_subclassing_the_generated_class_keeps_the_profile(self):
         from scrapling.spiders.presets import make_apt_spider
@@ -147,7 +148,7 @@ class TestAptSpider:
         spider = Mine()
 
         assert spider.adaptive_config is APT_PRESET
-        assert spider.fingerprint_pool[-1] == "safari18_1_ios"
+        assert {"firefox133_mac", "safari17_2_macos", "chrome120_mac"} <= set(spider.fingerprint_pool.all_names())
 
 
 class TestAptSpiderProxyPool:
@@ -172,3 +173,40 @@ class TestAptSpiderProxyPool:
 
         assert Spider.proxy_pool is None
         assert Spider.proxy_pool_config == ProxyPoolConfig()
+
+
+class TestPacingPresets:
+    def test_engineering_pacing_is_conservative_and_hourly(self):
+        from scrapling.spiders.presets import ENGINEERING_PACING
+
+        assert ENGINEERING_PACING.base_delay == 2.0
+        assert ENGINEERING_PACING.distribution == "uniform"
+        assert ENGINEERING_PACING.burst_size == 0
+        assert len(ENGINEERING_PACING.hour_multipliers) == 24
+        assert ENGINEERING_PACING.hour_multipliers[3] < ENGINEERING_PACING.hour_multipliers[9]
+
+    def test_apt_pacing_bursts_and_rotates(self):
+        from scrapling.spiders.presets import APT_PACING
+
+        assert APT_PACING.base_delay == 0.3
+        assert APT_PACING.burst_size == 20
+        assert APT_PACING.burst_pause_min == 2.0
+        assert APT_PACING.rotate_session_every == 500
+        assert set(APT_PACING.hour_multipliers) == {1.0}
+
+    def test_apt_spider_carries_the_apt_pacing(self):
+        from scrapling.spiders.presets import APT_PACING, make_apt_spider
+        from scrapling.spiders.spider import Spider
+
+        class Probe(make_apt_spider(Spider)):
+            name = "probe"
+
+            async def parse(self, response):
+                yield None
+
+        assert Probe().pacing_config is APT_PACING
+
+    def test_plain_spiders_fall_back_to_engineering_pacing(self):
+        from scrapling.spiders.spider import Spider
+
+        assert Spider.pacing_config is None

@@ -11,8 +11,15 @@ pages) so a single good response cannot drag you back into a wall you already hi
 from __future__ import annotations
 
 from scrapling.spiders.adaptive import AdaptiveConfig
+from scrapling.spiders.pacing import PacingConfig
 
-__all__ = ["APT_PRESET", "ENGINEERING_PRESET", "make_apt_spider"]
+__all__ = [
+    "APT_PACING",
+    "APT_PRESET",
+    "ENGINEERING_PACING",
+    "ENGINEERING_PRESET",
+    "make_apt_spider",
+]
 
 # 工程保守档
 ENGINEERING_PRESET = AdaptiveConfig(
@@ -23,7 +30,35 @@ ENGINEERING_PRESET = AdaptiveConfig(
     level_concurrency=(8, 6, 4, 2, 1),
 )
 
+# 工程档节奏：白天快一点、后半夜降速，不设突发停顿，间隔是"匀速但带抖动"的量级
+ENGINEERING_PACING = PacingConfig(
+    base_delay=2.0,
+    jitter_ratio=0.4,
+    distribution="uniform",
+    burst_size=0,
+    hour_multipliers=(
+        0.5, 0.5, 0.5, 0.5, 0.5, 0.8,
+        1.2, 1.5, 1.5, 1.5, 1.5, 1.2,
+        1.2, 1.0, 1.2, 1.5, 1.5, 1.5,
+        1.2, 1.0, 0.8, 0.6, 0.5, 0.5,
+    ),
+)
+
 # 攻击档（APT 级）
+# 攻击档节奏：间隔短、长尾抖动、20 次一顿、24 小时不降速、每 500 次换身份
+APT_PACING = PacingConfig(
+    base_delay=0.3,
+    jitter_ratio=0.6,
+    distribution="lognormal",
+    distribution_params={"sigma": 0.7},
+    burst_size=20,
+    burst_pause_min=2.0,
+    burst_pause_max=5.0,
+    hour_multipliers=(1.0,) * 24,
+    rotate_session_every=500,
+    rotate_pause=2.0,
+)
+
 APT_PRESET = AdaptiveConfig(
     upgrade_at_risk=20.0,  # 一次信号就升级
     downgrade_after_success=30,  # 极慢降级
@@ -45,7 +80,7 @@ def make_apt_spider(base_class):
             name = "my_apt_crawl"
             start_urls = ["https://target.example"]
     """
-    from scrapling.spiders.adaptive import AdaptiveConfig  # noqa: F401  (documented import path)
+    from scrapling.spiders.adaptive import AdaptiveConfig
     from scrapling.spiders.fingerprint import APT_FINGERPRINTS, FingerprintPool
     from scrapling.spiders.proxy_pool import ProxyPoolConfig
     from scrapling.spiders.retry import RetryPolicy
@@ -62,6 +97,9 @@ def make_apt_spider(base_class):
 
         # 指纹池：5 个浏览器 + 3 个 macOS 变体，同一域名粘一个，reset 后才换
         fingerprint_pool = FingerprintPool(APT_FINGERPRINTS)
+
+        # 节奏：0.3s 基准 + 20 次一顿 + 500 次换 session
+        pacing_config = APT_PACING
 
         # 代理池按需注入（proxy_pool 仍为 None），但池策略更激进
         proxy_pool_config = ProxyPoolConfig(

@@ -13,6 +13,7 @@ from scrapling.spiders.engine import CrawlerEngine
 from scrapling.spiders.session import SessionManager, STATIC_DEFAULT_SID
 from scrapling.spiders.proxy_pool import ProxyPool, ProxyPoolConfig
 from scrapling.spiders.fingerprint import FingerprintPool
+from scrapling.spiders.pacing import PacingConfig
 from scrapling.core.utils import set_logger, reset_logger
 from scrapling.spiders.result import CrawlResult, CrawlStats
 from scrapling.core._types import Set, Any, Dict, Optional, Union, TYPE_CHECKING, AsyncGenerator
@@ -96,6 +97,9 @@ class Spider(ABC):
 
     # Whole-browser profiles for the TLS/PROXY rungs. None means the default set.
     fingerprint_pool: Optional["FingerprintPool"] = None
+
+    # Request rhythm. None = pacing off (zero overhead); set a PacingConfig to opt in.
+    pacing_config: Optional["PacingConfig"] = None
 
     start_urls: list[str] = []
     allowed_domains: Set[str] = set()
