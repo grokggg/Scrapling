@@ -16,9 +16,9 @@
 - [x] P2 signal detection + adaptive
 - [x] P3 session isolation + ladder + reset
 - [x] P4 proxy pool
-- [ ] P5 fingerprint profiles
-- [ ] P6 pacing
-- [ ] P7 render pool
+- [x] P5 fingerprint profiles
+- [x] P6 pacing
+- [x] P7 render pool
 - [ ] P8 incremental
 - [ ] P9 storage
 - [ ] P10 telemetry
