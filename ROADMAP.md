@@ -21,5 +21,5 @@
 - [x] P7 render pool
 - [x] P8 incremental
 - [x] P9 storage + engine hook
-- [ ] P10 telemetry
+- [x] P10 telemetry (pure logic; engine wiring pending)
 - [ ] P11 distributed

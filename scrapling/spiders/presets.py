@@ -126,6 +126,11 @@ def make_apt_spider(base_class):
         # 每次调用一个独立连接，绝不跨 run 共享句柄。
         apt_store_path = "./apt_store.db"
 
+        # 可观测层：APT 默认打开结构化日志和 /metrics，工程档保持全关。
+        telemetry_enabled = True
+        telemetry_log_format = "json"
+        telemetry_export_port = 9101  # Prometheus 常扫的 9100 隔壁
+
         @classmethod
         def apt_store_factory(cls) -> SQLiteStore:
             return SQLiteStore(cls.apt_store_path)

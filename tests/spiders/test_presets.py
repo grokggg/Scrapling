@@ -331,3 +331,26 @@ class TestAptStore:
                 yield None
 
         assert Probe.apt_store_path == "./apt_store.db"
+
+
+class TestAptTelemetry:
+    def test_apt_turns_telemetry_on(self):
+        from scrapling.spiders.presets import make_apt_spider
+        from scrapling.spiders.spider import Spider
+
+        class Probe(make_apt_spider(Spider)):
+            name = "apt_telemetry_probe"
+
+            async def parse(self, response):
+                yield None
+
+        assert Probe.telemetry_enabled is True
+        assert Probe.telemetry_export_port == 9101
+        assert Probe.telemetry_log_format == "json"
+
+    def test_the_engineering_default_stays_quiet(self):
+        from scrapling.spiders.spider import Spider
+
+        assert Spider.telemetry_enabled is False
+        assert Spider.telemetry_export_port == 0
+        assert Spider.telemetry_log_format == "text"

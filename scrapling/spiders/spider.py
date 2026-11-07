@@ -112,6 +112,15 @@ class Spider(ABC):
     #: 默认关闭，显式打开才做内容去重。
     dedup_enabled: bool = False
 
+    #: 可观测层。默认全关：不给基础行为加任何开销。
+    telemetry_enabled: bool = False
+    #: 0 = 只攒指标，不开 HTTP；非 0 = 在该端口暴露 /metrics
+    telemetry_export_port: int = 0
+    #: text = 人读；json = 单行结构化，带 trace_id
+    telemetry_log_format: str = "text"
+    #: json 日志额外带哪些 LogRecord 字段
+    telemetry_extra_fields: tuple[str, ...] = ("domain", "url", "sid")
+
     # BROWSER rung knobs. Defaults mirror the upstream validator defaults, so a spider that
     # sets none of them behaves exactly as before.
     browser_max_pages: int = 1
