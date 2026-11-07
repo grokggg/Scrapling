@@ -348,6 +348,31 @@ async def test_callback_resolver_rebinds_the_callable():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"k": [1, 2], "b": b"raw"},
+        {"nested": {"deep": [b"\x00\xff", {"again": b""}]}},
+        {"sid": "918", "flag": None, "n": 1.5, "t": True},
+    ],
+)
+async def test_meta_survives_the_round_trip_including_bytes(meta):
+    queue, _ = _queue()
+    await queue.enqueue(_request(meta=meta))
+
+    assert (await queue.dequeue()).meta == meta
+
+
+@pytest.mark.asyncio
+async def test_uncopyable_meta_fails_loudly_instead_of_being_stringified():
+    queue, _ = _queue()
+    request = _request(meta={"bad": object()})
+
+    with pytest.raises(TypeError, match="JSON-serialisable"):
+        await queue.enqueue(request)
+
+
+@pytest.mark.asyncio
 async def test_use_before_start_is_an_explicit_error():
     queue = PostgresQueue("postgresql://fake/db")
 

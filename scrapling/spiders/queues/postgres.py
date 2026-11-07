@@ -27,6 +27,10 @@ from scrapling.spiders.request import Request
 
 log = logging.getLogger("scrapling.queue.postgres")
 
+# ``orjson`` has no bytes type, and silently turning b"x" into "b'x'" would corrupt meta on the
+# way back. Tag it instead, and refuse anything else it cannot represent rather than repr() it.
+_BYTES_KEY = "$scrapling_bytes"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scrapling_queue (
     fingerprint BYTEA PRIMARY KEY,
@@ -265,6 +269,25 @@ class PostgresQueue:
     # -- serialisation ---------------------------------------------------
 
     @staticmethod
+    def _encode(value: Any) -> dict[str, str]:
+        if isinstance(value, (bytes, bytearray)):
+            return {_BYTES_KEY: bytes(value).hex()}
+        raise TypeError(
+            f"PostgresQueue cannot store {type(value).__name__} inside a request: meta and "
+            "session kwargs must be JSON-serialisable (bytes are supported, other objects are not)"
+        )
+
+    @classmethod
+    def _decode(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            if len(value) == 1 and _BYTES_KEY in value:
+                return bytes.fromhex(value[_BYTES_KEY])
+            return {key: cls._decode(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._decode(item) for item in value]
+        return value
+
+    @staticmethod
     def _dump(request: Request) -> str:
         callback_name = getattr(request, "_callback_name", None)
         if not callback_name and request.callback is not None:
@@ -279,7 +302,13 @@ class PostgresQueue:
             "_session_kwargs": request._session_kwargs,
             "callback_name": callback_name,
         }
-        return orjson.dumps(state, default=repr).decode()
+        try:
+            return orjson.dumps(state, default=PostgresQueue._encode).decode()
+        except TypeError as exc:
+            raise TypeError(
+                f"PostgresQueue cannot store this request ({exc}): meta and session kwargs must "
+                "be JSON-serialisable; bytes are supported, other objects are not"
+            ) from exc
 
     def _load(self, payload: Any, lease_token: Optional[str]) -> Request:
         state = orjson.loads(payload) if isinstance(payload, (bytes, bytearray, str)) else dict(payload)
@@ -288,9 +317,9 @@ class PostgresQueue:
             sid=state.get("sid", ""),
             priority=int(state.get("priority", 0)),
             dont_filter=bool(state.get("dont_filter", False)),
-            meta=state.get("meta") or {},
+            meta=self._decode(state.get("meta") or {}),
             _retry_count=int(state.get("_retry_count", 0)),
-            **(state.get("_session_kwargs") or {}),
+            **self._decode(state.get("_session_kwargs") or {}),
         )
         name = state.get("callback_name")
         if name:
