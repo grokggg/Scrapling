@@ -95,6 +95,9 @@ shell = [
     "markdownify>=1.2.0",
     "scrapling[fetchers]",
 ]
+postgres = [
+    "asyncpg>=0.29",
+]
 all = [
     "scrapling[ai,shell]",
 ]
