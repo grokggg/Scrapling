@@ -9,7 +9,8 @@ import pytest
 
 pytest.importorskip("asyncpg")
 
-from scrapling.spiders.queues.postgres import PostgresQueue, QueueEmptyError  # noqa: E402
+from scrapling.spiders.queue_errors import QueueEmpty  # noqa: E402
+from scrapling.spiders.queues.postgres import PostgresQueue  # noqa: E402
 from scrapling.spiders.request import Request  # noqa: E402
 
 URL_A = "https://example.com/a"
@@ -310,11 +311,12 @@ async def test_restore_replaces_the_undone_rows():
 
 
 @pytest.mark.asyncio
-async def test_dequeue_raises_when_the_table_stays_empty():
-    queue, _ = _queue(idle_timeout=0)
+async def test_dequeue_raises_queue_empty_when_the_claim_finds_no_row():
+    queue, pool = _queue()
 
-    with pytest.raises(QueueEmptyError, match="no request became available"):
+    with pytest.raises(QueueEmpty):
         await queue.dequeue()
+    assert queue.is_empty is True, "the failed claim refreshes the cached emptiness"
 
 
 @pytest.mark.asyncio

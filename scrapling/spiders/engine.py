@@ -11,6 +11,7 @@ from anyio import create_task_group, CapacityLimiter, create_memory_object_strea
 from scrapling.core.utils import log
 from scrapling.spiders.scheduler import Scheduler
 from scrapling.spiders.session import SessionManager
+from scrapling.spiders.queue_errors import QueueClosed, QueueEmpty
 from scrapling.spiders.request import Request, Response
 from scrapling.spiders.robotstxt import RobotsTxtManager
 from scrapling.spiders.result import CrawlStats, ItemList
@@ -862,7 +863,22 @@ class CrawlerEngine:
                             await anyio.sleep(0.01)
                             continue
 
-                        request = await self.scheduler.dequeue()
+                        try:
+                            request = await self.scheduler.dequeue()
+                        except QueueEmpty:
+                            # Someone else may have claimed the last request between the is_empty
+                            # check and the claim. Stop only when this worker has nothing in
+                            # flight either; otherwise give the queue a moment.
+                            if self.scheduler.is_empty and self._active_tasks == 0:
+                                self._running = False
+                                log.debug("Spider idle")
+                                break
+                            await anyio.sleep(0.1)
+                            continue
+                        except QueueClosed:
+                            log.info("Queue closed, stopping")
+                            self._running = False
+                            break
                         self._active_tasks += 1
                         tg.start_soon(self._task_wrapper, request)
 

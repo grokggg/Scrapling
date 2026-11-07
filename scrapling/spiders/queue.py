@@ -36,7 +36,13 @@ class Queue(Protocol):
         ...
 
     async def dequeue(self) -> Request:
-        """Take the next request. Blocks while the queue is empty; the backend decides."""
+        """Take the next request.
+
+        Raises ``QueueEmpty`` when there is nothing to hand out right now and ``QueueClosed``
+        when no further work can ever arrive. An implementation may wait for a while before
+        giving up (``MemoryQueue`` waits ``dequeue_timeout``) or answer immediately
+        (``PostgresQueue`` raises as soon as the claim returns no row).
+        """
         ...
 
     async def complete(self, request: Request) -> None:

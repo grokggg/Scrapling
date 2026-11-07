@@ -13,6 +13,7 @@ import asyncio
 from itertools import count
 
 from scrapling.core.utils import log
+from scrapling.spiders.queue_errors import QueueEmpty
 from scrapling.spiders.request import Request
 from scrapling.core._types import List, Set, Tuple, Literal, TYPE_CHECKING
 
@@ -35,6 +36,7 @@ class MemoryQueue:
         include_headers: bool = False,
         keep_fragments: bool = False,
         crawl_strategy: Literal["bfs", "dfs"] = "bfs",
+        dequeue_timeout: float = 1.0,
     ):
         if crawl_strategy not in ("bfs", "dfs"):
             raise ValueError("crawl_strategy must be 'bfs' or 'dfs'")
@@ -49,6 +51,7 @@ class MemoryQueue:
         self._include_kwargs = include_kwargs
         self._include_headers = include_headers
         self._keep_fragments = keep_fragments
+        self._dequeue_timeout = float(dequeue_timeout)
 
     def _fingerprint(self, request: Request) -> bytes:
         """Cached inside the request: computing it again after a mutation returns the same bytes."""
@@ -72,8 +75,18 @@ class MemoryQueue:
         return True
 
     async def dequeue(self) -> Request:
-        """Get the next request to process (stays tracked until complete())."""
-        _, counter, request = await self._queue.get()
+        """Get the next request to process (stays tracked until complete()).
+
+        Raises ``QueueEmpty`` after ``dequeue_timeout`` of silence instead of waiting forever: a
+        crawling worker has to be able to notice that it has nothing to do, otherwise several
+        workers on one queue would all sit in ``get()`` while another worker holds the work.
+        """
+        try:
+            _, counter, request = await asyncio.wait_for(
+                self._queue.get(), timeout=self._dequeue_timeout
+            )
+        except asyncio.TimeoutError:
+            raise QueueEmpty() from None
         self._inflight.setdefault(self._fingerprint(request), []).append(counter)
         return request
 

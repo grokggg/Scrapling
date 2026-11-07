@@ -5,6 +5,7 @@ import inspect
 import pytest
 
 from scrapling.spiders.checkpoint import CheckpointData
+from scrapling.spiders.queue_errors import QueueEmpty
 from scrapling.spiders.queues.memory import MemoryQueue
 from scrapling.spiders.request import Request
 from scrapling.spiders.scheduler import Scheduler
@@ -132,3 +133,11 @@ async def test_complete_is_a_coroutine_and_hits_the_backend_once():
     await scheduler.complete(Request("https://example.com/a"))
 
     assert backend.calls == [("complete", "https://example.com/a")]
+
+
+@pytest.mark.asyncio
+async def test_dequeue_forwards_queue_empty():
+    scheduler = Scheduler(backend=MemoryQueue(dequeue_timeout=0.02))
+
+    with pytest.raises(QueueEmpty):
+        await scheduler.dequeue()

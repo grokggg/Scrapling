@@ -9,7 +9,6 @@ twice over the life of a crawl — callbacks must tolerate a repeat, which is th
 ``asyncpg`` is optional; the rest of the library does not import it.
 """
 
-import asyncio
 import logging
 import uuid
 from typing import Any, Callable, Optional
@@ -23,6 +22,7 @@ except ImportError as exc:  # pragma: no cover - depends on the environment
 
 import orjson
 
+from scrapling.spiders.queue_errors import QueueEmpty
 from scrapling.spiders.request import Request
 
 log = logging.getLogger("scrapling.queue.postgres")
@@ -94,15 +94,6 @@ _SNAPSHOT_SEEN = "SELECT fingerprint FROM scrapling_queue"
 _CLEAR_UNDONE = "DELETE FROM scrapling_queue WHERE status <> 'done'"
 
 
-class QueueEmptyError(RuntimeError):
-    """No row became available within ``idle_timeout``.
-
-    ``CrawlerEngine`` only dequeues when it believes the queue is not empty, so this surfaces
-    when another worker claimed the last row first. The crawl loop has no handler for it yet;
-    treat it as "this worker is done" rather than as a fatal error.
-    """
-
-
 class PostgresQueue:
     """A :class:`~scrapling.spiders.queue.Queue` stored in Postgres.
 
@@ -115,7 +106,9 @@ class PostgresQueue:
         request loaded from the table keeps its name in ``_callback_name`` and the engine falls
         back to ``spider.parse`` — pass ``lambda name: getattr(spider, name, spider.parse)``
         from ``on_start`` to keep per-request callbacks across processes.
-    :param idle_timeout: Seconds ``dequeue`` waits for a row before raising ``QueueEmptyError``.
+
+    ``dequeue`` raises ``QueueEmpty`` as soon as the claim returns no row: the crawl loop already
+    knows how to wait, and polling inside the queue would hide that decision from it.
     """
 
     def __init__(
@@ -127,8 +120,6 @@ class PostgresQueue:
         include_headers: bool = False,
         keep_fragments: bool = False,
         callback_resolver: Optional[Callable[[str], Any]] = None,
-        idle_timeout: float = 5.0,
-        poll_interval: float = 0.05,
         min_size: int = 0,
         max_size: int = 10,
     ) -> None:
@@ -138,8 +129,6 @@ class PostgresQueue:
         self._fp_include_headers = include_headers
         self._fp_keep_fragments = keep_fragments
         self._resolve_callback = callback_resolver
-        self._idle_timeout = float(idle_timeout)
-        self._poll_interval = float(poll_interval)
         self._min_size = int(min_size)
         self._max_size = int(max_size)
         self._pool: Any = None
@@ -197,21 +186,16 @@ class PostgresQueue:
 
     async def dequeue(self) -> Request:
         pool = self._require_pool()
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._idle_timeout
-        while True:
-            token = uuid.uuid4().hex
-            async with pool.acquire() as connection:
-                row = await connection.fetchrow(_CLAIM, token, self._lease_seconds)
-            if row is not None:
-                payload = row["request_json"]
-                return self._load(payload, token)
-            if loop.time() >= deadline:
-                raise QueueEmptyError(
-                    f"no request became available within {self._idle_timeout}s "
-                    "(another worker may have claimed the last row)"
-                )
-            await asyncio.sleep(self._poll_interval)
+        token = uuid.uuid4().hex
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(_CLAIM, token, self._lease_seconds)
+            if row is None:
+                # Refresh the cached emptiness before raising: the caller is about to ask
+                # ``is_empty`` to decide between "wait" and "stop", and a stale True there would
+                # spin a worker that has nothing left to claim.
+                self._has_undone = not await connection.fetchval(_IS_EMPTY)
+                raise QueueEmpty()
+        return self._load(row["request_json"], token)
 
     async def complete(self, request: Request) -> Optional[bool]:
         """Mark the row done. Returns None when the lease was already reclaimed."""
