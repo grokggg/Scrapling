@@ -76,7 +76,10 @@ print(runner.run(["https://example.com/blog"]).as_dict())
 2. **At-least-once, never at-most-once.** Work is retried on crash; your extractor and store must
    therefore be idempotent (the JSONL store keys on URL, the frontier dedupes by hash).
 3. **Content dedupe needs real text.** Pass the article body as `item["text"]`; SimHash on boilerplate
-   (nav/footer) collapses everything into one "duplicate".
+   (nav/footer) collapses everything into one "duplicate". Length matters as much as content: on a
+   72-char sentence a single word edit lands **14 bits** apart, on a 180-char paragraph the same edit
+   lands **5**. Snippets under ~150 chars are effectively unique and will never dedupe — that is a
+   property of SimHash, not a bug, so feed it paragraphs.
 4. **Threshold < bands.** Recall of the banded index is guaranteed only when `threshold < bands`
    (pigeonhole). The constructor refuses the unsafe combination rather than losing matches quietly.
 5. **Audit before you need it.** `audit-verify` walks the hash chain; a single edited line breaks it.
