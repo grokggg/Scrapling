@@ -110,6 +110,7 @@ class Spider(ABC):
     browser_retry_delay: float = 1.0
     browser_resource_profile: str = "none"  # none / speed / fidelity
     browser_block_analytics: bool = False
+    browser_fallback_to_static: bool = True  # BROWSER 档失败时降档到 TLS 重试一次
 
     start_urls: list[str] = []
     allowed_domains: Set[str] = set()
@@ -310,6 +311,20 @@ class Spider(ABC):
         if self._engine is None or not hasattr(self._engine, "_adaptive_engine"):
             return {}
         return self._engine._adaptive_engine.stats()
+
+    def failure_stats(self) -> dict:
+        """返回所有 BROWSER session 的渲染失败统计，用于可观测。
+
+        形如 ``{"browser:4:example.com": {"total": 3, "by_type": {"TimeoutError": 3}}}``。
+        没有在跑的 engine 时返回空 dict。
+        """
+        if self._engine is None:
+            return {}
+        return {
+            sid: session.failure_summary()
+            for sid, session in self._engine.session_manager._sessions.items()
+            if sid.startswith("browser:") and hasattr(session, "failure_summary")
+        }
 
     def pause(self):
         """Request graceful shutdown of the crawling process."""

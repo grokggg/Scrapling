@@ -262,3 +262,18 @@ class TestAptResourceProfile:
 
         assert Spider.browser_resource_profile == "none"
         assert Spider.browser_block_analytics is False
+
+
+class TestAptFallback:
+    def test_apt_spider_downgrades_a_failed_render(self):
+        from scrapling.spiders.presets import make_apt_spider
+        from scrapling.spiders.spider import Spider
+
+        class Probe(make_apt_spider(Spider)):
+            name = "apt_fallback_probe"
+
+            async def parse(self, response):
+                yield None
+
+        assert Probe().browser_fallback_to_static is True
+        assert Spider.browser_fallback_to_static is True

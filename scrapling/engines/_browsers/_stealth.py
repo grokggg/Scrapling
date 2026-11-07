@@ -1,6 +1,7 @@
+from dataclasses import dataclass, field
 from random import randint
 from re import compile as re_compile
-from time import monotonic, sleep as time_sleep
+from time import monotonic, sleep as time_sleep, time
 from asyncio import sleep as asyncio_sleep
 from contextlib import suppress
 
@@ -19,6 +20,21 @@ from scrapling.engines._browsers._validators import validate_fetch as _validate,
 
 __CF_PATTERN__ = re_compile(r"^https?://challenges\.cloudflare\.com/cdn-cgi/challenge-platform/.*")
 __CF_MAX_SOLVE_ATTEMPTS__ = 3
+#: How many failure snapshots a session keeps before dropping the oldest.
+__MAX_FAILURES__ = 100
+
+
+@dataclass
+class FetchFailure:
+    """Snapshot of one failed render attempt, for degradation decisions and diagnosis."""
+
+    url: str
+    exc_type: str
+    exc_msg: str
+    attempt: int
+    elapsed_ms: float
+    level: str = "browser"
+    timestamp: float = field(default_factory=time)
 
 
 class StealthySession(SyncSession, StealthySessionMixin):
@@ -257,6 +273,11 @@ class StealthySession(SyncSession, StealthySessionMixin):
             "https://www.google.com/" if (params.google_search and "referer" not in request_headers_keys) else None
         )
 
+        # Resource blocking is per-session, not per-call: the fetch params do not carry it,
+        # so fall back to the config the session was built with.
+        resource_profile = getattr(params, "resource_profile", None) or self._config.resource_profile
+        block_analytics = getattr(params, "block_analytics", self._config.block_analytics)
+
         for attempt in range(self._config.retries):
             proxy: Optional[ProxyType] = None
             if self._config.proxy_rotator and static_proxy is None:
@@ -270,8 +291,8 @@ class StealthySession(SyncSession, StealthySessionMixin):
                 params.disable_resources,
                 proxy,
                 params.blocked_domains,
-                resource_profile=params.resource_profile,
-                block_analytics=params.block_analytics,
+                resource_profile=resource_profile,
+                block_analytics=block_analytics,
             ) as page_info:
                 final_response: List = [None]
                 page = page_info.page
@@ -397,6 +418,7 @@ class AsyncStealthySession(AsyncSession, StealthySessionMixin):
             record_requests=self._config.record_requests,
             max_recorded_requests=self._config.max_recorded_requests,
         )
+        self._failures: List[FetchFailure] = []
 
     async def start(self) -> None:
         """Create a browser for this instance and context."""
@@ -544,6 +566,16 @@ class AsyncStealthySession(AsyncSession, StealthySessionMixin):
                     log.info("Looks like Cloudflare captcha is still present, solving again")
                     return await self._cloudflare_solver(page, _attempts + 1)
 
+    def recent_failures(self, limit: int = 10) -> List[FetchFailure]:
+        """The most recent failed attempts, newest last. For diagnosis, not for decisions."""
+        return self._failures[-limit:]
+
+    def failure_summary(self) -> dict:
+        """Failure counts grouped by exception type."""
+        from collections import Counter
+
+        return {"total": len(self._failures), "by_type": dict(Counter(f.exc_type for f in self._failures))}
+
     async def fetch(self, url: str, **kwargs: Unpack[StealthFetchParams]) -> Response:
         """Opens up the browser and do your request based on your chosen options.
 
@@ -581,7 +613,13 @@ class AsyncStealthySession(AsyncSession, StealthySessionMixin):
             "https://www.google.com/" if (params.google_search and "referer" not in request_headers_keys) else None
         )
 
+        # Resource blocking is per-session, not per-call: the fetch params do not carry it,
+        # so fall back to the config the session was built with.
+        resource_profile = getattr(params, "resource_profile", None) or self._config.resource_profile
+        block_analytics = getattr(params, "block_analytics", self._config.block_analytics)
+
         for attempt in range(self._config.retries):
+            attempt_start = monotonic()
             proxy: Optional[ProxyType] = None
             if self._config.proxy_rotator and static_proxy is None:
                 proxy = self._config.proxy_rotator.get_proxy()
@@ -594,8 +632,8 @@ class AsyncStealthySession(AsyncSession, StealthySessionMixin):
                 params.disable_resources,
                 proxy,
                 params.blocked_domains,
-                resource_profile=params.resource_profile,
-                block_analytics=params.block_analytics,
+                resource_profile=resource_profile,
+                block_analytics=block_analytics,
             ) as page_info:
                 final_response: List = [None]
                 page = page_info.page
@@ -648,6 +686,17 @@ class AsyncStealthySession(AsyncSession, StealthySessionMixin):
 
                     except Exception as e:
                         page_info.mark_error()
+                        self._failures.append(
+                            FetchFailure(
+                                url=url,
+                                exc_type=type(e).__name__,
+                                exc_msg=str(e)[:200],
+                                attempt=attempt + 1,
+                                elapsed_ms=(monotonic() - attempt_start) * 1000,
+                            )
+                        )
+                        if len(self._failures) > __MAX_FAILURES__:
+                            del self._failures[: -__MAX_FAILURES__]
                         if attempt < self._config.retries - 1:
                             if is_proxy_error(e):
                                 log.warning(

@@ -109,6 +109,7 @@ def make_apt_spider(base_class):
         browser_retry_delay = 0.5
         browser_resource_profile = "speed"  # 速度档，不再一刀切
         browser_block_analytics = True
+        browser_fallback_to_static = True  # 渲染失败当场降档 TLS，BROWSER 挂不再等于 URL 丢
 
         # 代理池按需注入（proxy_pool 仍为 None），但池策略更激进
         proxy_pool_config = ProxyPoolConfig(

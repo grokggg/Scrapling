@@ -391,18 +391,55 @@ class CrawlerEngine:
                 # own. Low weight on purpose: it accumulates without triggering on its own.
                 if self._adaptive_engine is not None:
                     self._adaptive_engine.observe(domain, BlockSignal.EMPTY, 0.3)
-                decision, delay = RetryEngine(self._get_policy(request)).decide(request, exc=e)
-                if decision is RetryDecision.GIVE_UP:
-                    log.warning(
-                        "retry give up: url=%s exc=%s attempt=%d",
-                        request.url,
-                        type(e).__name__,
-                        attempt_of(request),
+
+                # The browser is the last rung, so its failure used to mean a lost URL. Retry
+                # the same request once at TLS strength instead: same object, same queue slot,
+                # no re-scheduling. One hop only — TLS failing goes back to the retry engine.
+                fell_back = False
+                if level is FetchLevel.BROWSER and getattr(self.spider, "browser_fallback_to_static", True):
+                    # The browser's proxy was just released as a failure; the TLS session
+                    # carries its own identity and must not inherit a dead lease.
+                    request._session_kwargs.pop("proxy", None)
+                    request._session_kwargs.pop("proxies", None)
+                    proxy_url = None
+                    request.sid = self.session_manager.ensure_domain_session(domain, FetchLevel.TLS)
+                    try:
+                        started_at = anyio.current_time()
+                        response = await self.session_manager.fetch(request)
+                        latency = anyio.current_time() - started_at
+                        fell_back = True
+                    except Exception as fallback_error:
+                        e = fallback_error
+                        log.warning(
+                            "TLS fallback failed too: url=%s exc=%s", request.url, type(fallback_error).__name__
+                        )
+
+                if fell_back:
+                    log.info("browser fell back to TLS: url=%s exc=%s", request.url, type(e).__name__)
+                    self.stats.increment_requests_count(
+                        request.sid or self.session_manager.default_session_id
                     )
-                    self.stats.failed_requests_count += 1
-                    await self.spider.on_error(request, e)
-                    return
-                retry_plan = (decision, delay)
+                    self.stats.increment_response_bytes(request.domain, len(response.body))
+                    self.stats.increment_status(response.status)
+                    if self._adaptive_engine is not None:
+                        signal = detect_signal(response)
+                        if signal.signal is not BlockSignal.NONE:
+                            self._adaptive_engine.observe(domain, signal.signal, signal.confidence)
+                        else:
+                            self._adaptive_engine.observe_success(domain)
+                else:
+                    decision, delay = RetryEngine(self._get_policy(request)).decide(request, exc=e)
+                    if decision is RetryDecision.GIVE_UP:
+                        log.warning(
+                            "retry give up: url=%s exc=%s attempt=%d",
+                            request.url,
+                            type(e).__name__,
+                            attempt_of(request),
+                        )
+                        self.stats.failed_requests_count += 1
+                        await self.spider.on_error(request, e)
+                        return
+                    retry_plan = (decision, delay)
 
         # Sleep outside the rate limiter: a backing-off worker must not hold a slot.
         if retry_plan is not None:

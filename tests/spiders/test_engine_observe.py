@@ -2,6 +2,7 @@
 
 import pytest
 
+from scrapling.engines._browsers._stealth import FetchFailure
 from scrapling.engines.toolbelt.custom import Response
 from scrapling.spiders.adaptive import AdaptiveEngine, FetchLevel
 from scrapling.spiders.engine import CrawlerEngine
@@ -237,3 +238,33 @@ class TestSpiderSurface:
 
         assert stats[DOMAIN]["level"] == int(FetchLevel.HEADERS)
         assert {"level", "risk", "signal_counts", "reset_count"} <= set(stats[DOMAIN])
+
+
+class TestFailureStats:
+    def test_no_running_engine_means_no_stats(self):
+        class Lone(Spider):
+            name = "lone"
+            start_urls = ["https://example.com/"]
+
+            async def parse(self, response):
+                yield None
+
+        assert Lone().failure_stats() == {}
+
+    def test_browser_failures_are_reported_per_session(self):
+        class Watching(Spider):
+            name = "watching"
+            start_urls = ["https://example.com/"]
+
+            async def parse(self, response):
+                yield None
+
+        spider = Watching()
+        spider._engine = CrawlerEngine(spider, spider._session_manager)
+        sid = spider._session_manager.ensure_domain_session(DOMAIN, FetchLevel.BROWSER)
+        spider._session_manager.get(sid)._failures = [
+            FetchFailure(url=f"https://{DOMAIN}/", exc_type="TimeoutError", exc_msg="boom", attempt=n, elapsed_ms=12.5)
+            for n in (1, 2)
+        ]
+
+        assert spider.failure_stats() == {sid: {"total": 2, "by_type": {"TimeoutError": 2}}}
