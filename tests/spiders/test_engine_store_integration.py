@@ -85,7 +85,7 @@ async def test_a_304_reuses_the_cache_and_still_refreshes_the_row(tmp_path):
     await _crawl(engine, url, _response(body=b"", status=304, url=url))
     second = spider.store.get(url)
 
-    assert engine.stats.custom_stats["incremental_hits"] == 1
+    assert engine.stats.incremental_hits == 1
     assert second.fetched_at >= first.fetched_at
     assert second.item == first.item, "the cached body produced the same row"
     assert spider.store.count() == 1
@@ -103,7 +103,8 @@ async def test_a_subclassed_spider_needs_no_engine_changes(tmp_path):
     await _crawl(engine, "https://quotes.example/page/2", _response(url="https://quotes.example/page/2"))
 
     assert spider.store.count() == 1, "page 2 is the same quote, dropped by dedup"
-    assert engine.stats.custom_stats == {"stored_new": 1, "dedup_skipped": 1}
+    assert (engine.stats.stored_new, engine.stats.dedup_skipped) == (1, 1)
+    assert engine.stats.custom_stats == {}
     spider.store.close()
 
 

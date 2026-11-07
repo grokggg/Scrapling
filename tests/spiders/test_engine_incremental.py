@@ -60,7 +60,7 @@ async def test_without_a_cache_nothing_is_conditional():
     await engine._process_request(Request(URL))
 
     assert fetcher.seen == [{}]
-    assert "incremental_hits" not in engine.stats.custom_stats
+    assert engine.stats.incremental_hits == 0
 
 
 @pytest.mark.asyncio
@@ -101,7 +101,7 @@ async def test_a_304_is_served_from_the_cache_as_a_200():
 
     await engine._process_request(Request(URL))
 
-    assert engine.stats.custom_stats["incremental_hits"] == 1
+    assert engine.stats.incremental_hits == 1
     assert engine.stats.response_status_count == {"status_200": 1}
     assert engine.stats.requests_count == 1
 
@@ -115,8 +115,8 @@ async def test_a_200_with_the_same_body_counts_as_a_hit():
 
     await engine._process_request(Request(URL))
 
-    assert engine.stats.custom_stats["incremental_hits"] == 1
-    assert "incremental_misses" not in engine.stats.custom_stats
+    assert engine.stats.incremental_hits == 1
+    assert engine.stats.incremental_misses == 0
 
 
 @pytest.mark.asyncio
@@ -128,8 +128,8 @@ async def test_a_changed_200_refreshes_the_cache():
 
     await engine._process_request(Request(URL))
 
-    assert engine.stats.custom_stats["incremental_misses"] == 1
-    assert "incremental_hits" not in engine.stats.custom_stats
+    assert engine.stats.incremental_misses == 1
+    assert engine.stats.incremental_hits == 0
     assert cache.get(URL).body_size == len(NEW_BODY)
 
 
@@ -142,7 +142,7 @@ async def test_the_first_200_populates_the_cache():
     await engine._process_request(Request(URL))
 
     assert cache.conditional_headers(URL) == {"If-Modified-Since": "Wed, 21 Oct 2015 07:28:00 GMT"}
-    assert engine.stats.custom_stats["incremental_misses"] == 1
+    assert engine.stats.incremental_misses == 1
 
 
 @pytest.mark.asyncio
@@ -158,7 +158,7 @@ async def test_a_post_never_goes_incremental():
     await engine._process_request(request)
 
     assert fetcher.seen == [{}]
-    assert "incremental_hits" not in engine.stats.custom_stats
+    assert engine.stats.incremental_hits == 0
 
 
 @pytest.mark.asyncio

@@ -380,6 +380,11 @@ class TestCrawlStats:
         assert result["elapsed_seconds"] == 5.0
         assert result["requests_per_second"] == 3.0
         assert result["response_status_count"] == {"status_200": 1}
+        assert result["incremental_hits"] == 0
+        assert result["incremental_misses"] == 0
+        assert result["stored_new"] == 0
+        assert result["stored_updated"] == 0
+        assert result["dedup_skipped"] == 0
 
     def test_custom_stats(self):
         """Test custom_stats can be used."""

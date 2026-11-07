@@ -68,8 +68,8 @@ async def test_a_200_is_stored_as_new():
     await _run(engine)
 
     assert store.count() == 1
-    assert engine.stats.custom_stats["stored_new"] == 1
-    assert "stored_updated" not in engine.stats.custom_stats
+    assert engine.stats.stored_new == 1
+    assert engine.stats.stored_updated == 0
     saved = store.get(URL)
     assert saved.item["status"] == 200
     assert saved.item["url"] == URL
@@ -84,8 +84,8 @@ async def test_the_same_url_twice_updates_the_row():
     await _run(engine, response=_response(body=BODY + b"<!-- rev2 -->"))
 
     assert store.count() == 1
-    assert engine.stats.custom_stats["stored_new"] == 1
-    assert engine.stats.custom_stats["stored_updated"] == 1
+    assert engine.stats.stored_new == 1
+    assert engine.stats.stored_updated == 1
     assert "rev2" in store.get(URL).item["body_preview"]
 
 
@@ -104,8 +104,8 @@ async def test_dedup_skips_a_second_url_with_the_same_content():
     await _run(engine, "https://example.com/b")
 
     assert store.count() == 1
-    assert engine.stats.custom_stats["dedup_skipped"] == 1
-    assert engine.stats.custom_stats["stored_new"] == 1
+    assert engine.stats.dedup_skipped == 1
+    assert engine.stats.stored_new == 1
 
 
 @pytest.mark.asyncio
@@ -123,7 +123,7 @@ async def test_without_dedup_both_urls_are_kept():
     await _run(engine, "https://example.com/b")
 
     assert store.count() == 2
-    assert "dedup_skipped" not in engine.stats.custom_stats
+    assert engine.stats.dedup_skipped == 0
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_a_404_is_not_stored():
     await _run(engine, response=_response(status=404, body=b"missing"))
 
     assert store.count() == 0
-    assert "stored_new" not in engine.stats.custom_stats
+    assert engine.stats.stored_new == 0
 
 
 @pytest.mark.asyncio
@@ -209,5 +209,5 @@ async def test_a_304_hit_is_stored_once_not_twice():
     await _run(engine)  # same body, same url
 
     assert store.count() == 1
-    assert engine.stats.custom_stats["stored_new"] == 1
-    assert engine.stats.custom_stats["stored_updated"] == 1
+    assert engine.stats.stored_new == 1
+    assert engine.stats.stored_updated == 1

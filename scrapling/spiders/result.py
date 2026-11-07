@@ -145,6 +145,11 @@ class CrawlStats:
     sessions_requests_count: Dict = field(default_factory=dict)
     proxies: List[str | Dict | Tuple] = field(default_factory=list)
     log_levels_counter: Dict = field(default_factory=dict)
+    incremental_hits: int = 0
+    incremental_misses: int = 0
+    stored_new: int = 0
+    stored_updated: int = 0
+    dedup_skipped: int = 0
 
     @property
     def elapsed_seconds(self) -> float:
@@ -192,6 +197,11 @@ class CrawlStats:
             "proxies": self.proxies,
             "custom_stats": self.custom_stats,
             "log_count": self.log_levels_counter,
+            "incremental_hits": self.incremental_hits,
+            "incremental_misses": self.incremental_misses,
+            "stored_new": self.stored_new,
+            "stored_updated": self.stored_updated,
+            "dedup_skipped": self.dedup_skipped,
         }
 
 

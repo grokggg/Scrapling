@@ -1,4 +1,5 @@
 import json
+import logging
 import pprint
 from pathlib import Path
 from urllib.parse import urlparse
@@ -25,6 +26,7 @@ from scrapling.spiders.cache import ResponseCacheManager
 from scrapling.spiders.checkpoint import CheckpointManager, CheckpointData
 from scrapling.spiders.dedup import ContentDeduplicator
 from scrapling.spiders.store import StoredItem
+from scrapling.spiders.telemetry import MetricsRegistry, StructuredLogFormatter, new_trace_id, register_defaults, trace_context
 from scrapling.core._types import Dict, Union, Optional, TYPE_CHECKING, Any, AsyncGenerator
 
 if TYPE_CHECKING:
@@ -54,6 +56,25 @@ class CrawlerEngine:
             crawl_strategy=getattr(spider, "crawl_strategy", "bfs"),
         )
         self.stats = CrawlStats()
+
+        # P10: telemetry is a switch, not a tax. Off means no registry, no exporter, and
+        # _process_request skips the trace context wrapper entirely.
+        self._telemetry = bool(getattr(self.spider, "telemetry_enabled", False))
+        self._metrics: Optional[MetricsRegistry] = None
+        self._exporter: Any = None
+        if self._telemetry:
+            self._metrics = MetricsRegistry()
+            register_defaults(self._metrics)
+            self._install_json_logs()
+            port = int(getattr(self.spider, "telemetry_export_port", 0) or 0)
+            if port:
+                from scrapling.spiders.telemetry_export import TelemetryExporter
+
+                self._exporter = TelemetryExporter(
+                    self._metrics,
+                    host=getattr(self.spider, "telemetry_host", "127.0.0.1"),
+                    port=port,
+                )
 
         # One adaptive ladder per crawl: level per domain decides which session a request uses.
         self._adaptive_engine = AdaptiveEngine(getattr(self.spider, "adaptive_config", None) or ENGINEERING_PRESET)
@@ -271,7 +292,13 @@ class CrawlerEngine:
         log.info("Scheduled retry (%s, attempt %d): %s", decision.name, attempt_of(retry), request.url)
 
     async def _process_request(self, request: Request) -> None:
-        """Download and process a single request."""
+        """Download and process a single request, under its own trace id."""
+        if self._metrics is None:
+            return await self._process_request_inner(request)
+        with trace_context(new_trace_id()):
+            return await self._process_request_inner(request)
+
+    async def _process_request_inner(self, request: Request) -> None:
         if self._robots_manager:
             can_fetch = await self._robots_manager.can_fetch(request.url, request.sid)
             if not can_fetch:
@@ -333,6 +360,9 @@ class CrawlerEngine:
                 if proxy_url is not None:
                     request._session_kwargs["proxy"] = proxy_url
 
+        if self._metrics is not None:
+            self._metrics.gauge("scrapling_ladder_level").set(float(getattr(level, "value", level)), domain=domain)
+
         # P8: ask the origin only for what changed. Conditional headers lose to any the
         # caller already set, and a request with a body is never a cache lookup.
         cache = getattr(self.spider, "incremental_cache", None)
@@ -352,6 +382,8 @@ class CrawlerEngine:
             if self._pacing is not None:
                 # Both numbers are "at least this long", so the more conservative one wins.
                 delay = max(delay, self._pacing.next_delay(request.domain or ""))
+                if self._metrics is not None:
+                    self._metrics.histogram("scrapling_pacing_delay_seconds").observe(delay, domain=domain)
 
             if delay:
                 await anyio.sleep(delay)
@@ -370,13 +402,24 @@ class CrawlerEngine:
                 if cache_key is not None:
                     response = self._apply_incremental(cache, cache_key, request, response)
 
+                if self._metrics is not None:
+                    self._metrics.counter("scrapling_requests_total").inc(status=str(response.status))
+                    self._metrics.histogram("scrapling_request_duration_seconds").observe(
+                        latency, level=level.name
+                    )
+
                 if proxy_url is not None:
+                    proxy_ok = 200 <= response.status < 400
                     self._proxy_pool.release(
                         proxy_url,
-                        success=200 <= response.status < 400,
+                        success=proxy_ok,
                         latency_ms=latency * 1000,
                         domain=domain,
                     )
+                    if self._metrics is not None:
+                        self._metrics.counter("scrapling_proxy_success_total").inc(
+                            result="success" if proxy_ok else "fail"
+                        )
 
                 # Every response is evidence: a signal feeds the ladder, a clean one buys
                 # a step down. Done before stats so the ladder never depends on counters.
@@ -384,6 +427,8 @@ class CrawlerEngine:
                     signal = detect_signal(response)
                     if signal.signal is not BlockSignal.NONE:
                         self._adaptive_engine.observe(domain, signal.signal, signal.confidence)
+                        if self._metrics is not None:
+                            self._metrics.counter("scrapling_signals_total").inc(signal=signal.signal.name)
                         log.debug(
                             "signal %s on %s (conf=%.2f): %s",
                             signal.signal.name,
@@ -413,8 +458,12 @@ class CrawlerEngine:
                             await anyio.sleep(pause)
 
             except Exception as e:
+                if self._metrics is not None:
+                    self._metrics.counter("scrapling_requests_total").inc(status="error")
                 if proxy_url is not None:
                     self._proxy_pool.release(proxy_url, success=False, domain=domain)
+                    if self._metrics is not None:
+                        self._metrics.counter("scrapling_proxy_success_total").inc(result="fail")
                 # An exception is not proof of anti-bot, but a run of them is a risk of its
                 # own. Low weight on purpose: it accumulates without triggering on its own.
                 if self._adaptive_engine is not None:
@@ -425,6 +474,8 @@ class CrawlerEngine:
                 # no re-scheduling. One hop only — TLS failing goes back to the retry engine.
                 fell_back = False
                 if level is FetchLevel.BROWSER and getattr(self.spider, "browser_fallback_to_static", True):
+                    if self._metrics is not None:
+                        self._metrics.counter("scrapling_browser_failures_total").inc(exc=type(e).__name__)
                     # The browser's proxy was just released as a failure; the TLS session
                     # carries its own identity and must not inherit a dead lease.
                     request._session_kwargs.pop("proxy", None)
@@ -449,6 +500,11 @@ class CrawlerEngine:
                     )
                     self.stats.increment_response_bytes(request.domain, len(response.body))
                     self.stats.increment_status(response.status)
+                    if self._metrics is not None:
+                        self._metrics.counter("scrapling_requests_total").inc(status=str(response.status))
+                        self._metrics.histogram("scrapling_request_duration_seconds").observe(
+                            latency, level=FetchLevel.TLS.name
+                        )
                     if self._adaptive_engine is not None:
                         signal = detect_signal(response)
                         if signal.signal is not BlockSignal.NONE:
@@ -457,6 +513,8 @@ class CrawlerEngine:
                             self._adaptive_engine.observe_success(domain)
                 else:
                     decision, delay = RetryEngine(self._get_policy(request)).decide(request, exc=e)
+                    if self._metrics is not None:
+                        self._metrics.counter("scrapling_retries_total").inc(decision=decision.name)
                     if decision is RetryDecision.GIVE_UP:
                         log.warning(
                             "retry give up: url=%s exc=%s attempt=%d",
@@ -543,13 +601,18 @@ class CrawlerEngine:
                 meta=dict(getattr(request, "meta", None) or {}),
             )
             if self._dedup is not None and self._dedup.is_duplicate(stored):
-                self._bump("dedup_skipped")
+                self.stats.dedup_skipped += 1
                 log.debug("dedup skip: %s", request.url)
                 return
             is_new = store.put(stored)
             if self._dedup is not None:
                 self._dedup.mark_seen(stored)
-            self._bump("stored_new" if is_new else "stored_updated")
+            if is_new:
+                self.stats.stored_new += 1
+            else:
+                self.stats.stored_updated += 1
+            if self._metrics is not None:
+                self._metrics.counter("scrapling_store_ops_total").inc(op="new" if is_new else "update")
         except Exception as exc:
             log.warning("store failed for %s: %s: %s", request.url, type(exc).__name__, exc)
 
@@ -586,23 +649,32 @@ class CrawlerEngine:
                 # server's response rather than inventing a body.
                 return response
             cached.request = request
-            self._bump("incremental_hits")
+            self.stats.incremental_hits += 1
+            if self._metrics is not None:
+                self._metrics.counter("scrapling_incremental_hits_total").inc()
             log.debug("incremental: %s served from cache (status %s)", url, status)
             return cached
 
         if status == 200:
             cache.put(url, response)
-            self._bump("incremental_misses")
+            self.stats.incremental_misses += 1
         return response
 
-    def _bump(self, key: str, by: int = 1) -> None:
-        """Increment a CrawlStats field when it exists, else a custom counter."""
-        current = getattr(self.stats, key, None)
-        if isinstance(current, int):
-            setattr(self.stats, key, current + by)
+    def _install_json_logs(self) -> None:
+        """Swap this spider's logger onto the JSON formatter, leaving everyone else alone."""
+        if getattr(self.spider, "telemetry_log_format", "text") != "json":
             return
-        counters = self.stats.custom_stats
-        counters[key] = counters.get(key, 0) + by
+        logger = logging.getLogger(f"scrapling.spiders.{self.spider.name}")
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            StructuredLogFormatter(
+                extra_fields=tuple(getattr(self.spider, "telemetry_extra_fields", ("domain", "url", "sid")))
+            )
+        )
+        handler.set_name("scrapling-telemetry")
+        # Idempotent: a second call replaces our handler instead of stacking a duplicate.
+        logger.handlers = [h for h in logger.handlers if h.get_name() != "scrapling-telemetry"] + [handler]
+        logger.propagate = False
 
     async def _task_wrapper(self, request: Request) -> None:
         """Wrapper to track active task count."""
@@ -689,7 +761,17 @@ class CrawlerEngine:
         await self._robots_manager.prefetch(seed_urls, self.session_manager.default_session_id)
 
     async def crawl(self) -> CrawlStats:
-        """Run the spider and return CrawlStats."""
+        """Run the spider with the metrics endpoint up for exactly as long as the crawl."""
+        if self._exporter is None:
+            return await self._crawl()
+        self._exporter.start()
+        log.info("metrics endpoint: %s", self._exporter.url())
+        try:
+            return await self._crawl()
+        finally:
+            self._exporter.stop()
+
+    async def _crawl(self) -> CrawlStats:
         self._running = True
         self._items.clear()
         self.paused = False
