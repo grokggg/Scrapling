@@ -21,5 +21,5 @@
 - [x] P7 render pool
 - [x] P8 incremental
 - [x] P9 storage + engine hook
-- [x] P10 telemetry
+- [x] P10 telemetry (logs, metrics, Prometheus export, engine wiring)
 - [ ] P11 distributed

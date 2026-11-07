@@ -214,6 +214,7 @@ async def test_a_browser_fallback_is_counted_once():
 
     assert engine._metrics.get("scrapling_browser_failures_total").value(exc="TimeoutError") == 1
     assert engine._metrics.get("scrapling_requests_total").value(status="200") == 1
+    assert engine._metrics.get("scrapling_requests_total").snapshot()["scrapling_requests_total"] == {'status="200"': 1.0}
 
 
 @pytest.mark.asyncio
@@ -354,3 +355,56 @@ async def test_json_logs_only_touch_the_spiders_own_logger():
     finally:
         logger.handlers = before
         logger.propagate = True
+
+@pytest.mark.asyncio
+async def test_fallback_success_counts_one_request_no_error():
+    """A request rescued by the TLS fallback counts once, with its final status."""
+    spider = _Spider()
+    spider.browser_fallback_to_static = True
+    engine = _engine(spider, _Session())
+    engine._per_domain_sessions = True
+    engine._adaptive_engine = _Plan({"example.com": FetchLevel.BROWSER.value})
+    engine.session_manager.fetch = _Session(TimeoutError("page.goto"), _Response(status=200)).fetch
+
+    await _run(engine)
+
+    requests_total = engine._metrics.get("scrapling_requests_total").snapshot()["scrapling_requests_total"]
+    assert requests_total == {'status="200"': 1.0}, requests_total
+    assert 'status="error"' not in requests_total
+    assert engine.stats.requests_count == 1
+    assert engine._metrics.get("scrapling_browser_failures_total").value(exc="TimeoutError") == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_failure_counts_one_error():
+    """Browser fails and the fallback fails too: one request, one error, one retry decision."""
+    spider = _Spider()
+    spider.browser_fallback_to_static = True
+    engine = _engine(spider, _Session())
+    engine._per_domain_sessions = True
+    engine._adaptive_engine = _Plan({"example.com": FetchLevel.BROWSER.value})
+    engine.session_manager.fetch = _Session(TimeoutError("page.goto"), RuntimeError("tls gone")).fetch
+
+    await _run(engine)
+
+    requests_total = engine._metrics.get("scrapling_requests_total").snapshot()["scrapling_requests_total"]
+    assert requests_total == {'status="error"': 1.0}, requests_total
+    decisions = engine._metrics.get("scrapling_retries_total").snapshot()["scrapling_retries_total"]
+    assert sum(decisions.values()) == 1, decisions
+    assert engine._metrics.get("scrapling_browser_failures_total").value(exc="TimeoutError") == 1
+
+
+@pytest.mark.asyncio
+async def test_non_browser_failure_counts_one_error():
+    """A failure on a static rung never enters the fallback block, so it counts once as error."""
+    spider = _Spider()
+    spider.browser_fallback_to_static = True
+    engine = _engine(spider, _Session(TimeoutError("connect")))
+    engine._per_domain_sessions = True
+    engine._adaptive_engine = _Plan({"example.com": FetchLevel.TLS.value})
+
+    await _run(engine)
+
+    requests_total = engine._metrics.get("scrapling_requests_total").snapshot()["scrapling_requests_total"]
+    assert requests_total == {'status="error"': 1.0}, requests_total
+    assert engine._metrics.get("scrapling_browser_failures_total").snapshot()["scrapling_browser_failures_total"] == {}

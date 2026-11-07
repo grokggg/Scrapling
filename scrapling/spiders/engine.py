@@ -458,8 +458,6 @@ class CrawlerEngine:
                             await anyio.sleep(pause)
 
             except Exception as e:
-                if self._metrics is not None:
-                    self._metrics.counter("scrapling_requests_total").inc(status="error")
                 if proxy_url is not None:
                     self._proxy_pool.release(proxy_url, success=False, domain=domain)
                     if self._metrics is not None:
@@ -512,6 +510,11 @@ class CrawlerEngine:
                         else:
                             self._adaptive_engine.observe_success(domain)
                 else:
+                    # Only here is the request actually failed. A browser request rescued by the
+                    # TLS fallback above already counted itself with its final status; counting it
+                    # as an error first would make one request look like two.
+                    if self._metrics is not None:
+                        self._metrics.counter("scrapling_requests_total").inc(status="error")
                     decision, delay = RetryEngine(self._get_policy(request)).decide(request, exc=e)
                     if self._metrics is not None:
                         self._metrics.counter("scrapling_retries_total").inc(decision=decision.name)
