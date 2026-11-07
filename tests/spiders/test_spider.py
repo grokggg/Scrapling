@@ -360,13 +360,19 @@ class TestSpiderStartRequests:
 
     @pytest.mark.asyncio
     async def test_start_requests_uses_default_session(self):
-        """Test that start_requests uses default session ID."""
+        """Test that start_requests leaves the sid empty for the engine to fill per domain."""
         spider = ConcreteSpider()
         requests = [r async for r in spider.start_requests()]
 
-        # Should use the default session from session manager
-        default_sid = spider._session_manager.default_session_id
-        assert requests[0].sid == default_sid
+        # sid dispatch belongs to the engine: `_normalize_request` pins each request to
+        # its own domain's session (`static:0:{domain}`).
+        assert requests[0].sid == ""
+
+        from scrapling.spiders.engine import CrawlerEngine
+
+        engine = CrawlerEngine(spider, spider._session_manager)
+        engine._normalize_request(requests[0])
+        assert requests[0].sid.startswith("static:0:")
 
 
 class TestSpiderHooks:

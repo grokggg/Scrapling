@@ -347,3 +347,41 @@ class TestConfig:
         snapshot = engine.stats()
         snapshot[DOMAIN]["signal_counts"]["CAPTCHA"] = 99
         assert engine.stats()[DOMAIN]["signal_counts"]["CAPTCHA"] == 1
+
+
+class TestStatsSurface:
+    def test_stats_shape_is_stable(self):
+        engine = AdaptiveEngine(APT_PRESET)
+        engine.observe(DOMAIN, BlockSignal.CAPTCHA, 0.9)
+
+        stats = engine.stats()[DOMAIN]
+
+        assert set(stats) == {
+            "level",
+            "level_name",
+            "risk",
+            "cooling_until",
+            "success_streak",
+            "signal_counts",
+            "reset_pending",
+            "reset_count",
+        }
+        assert stats["level"] == int(FetchLevel.HEADERS)
+        assert stats["level_name"] == "HEADERS"
+        assert stats["signal_counts"]["CAPTCHA"] == 1
+        assert stats["reset_count"] == 0
+
+    def test_stats_after_reset_reports_the_history(self):
+        engine = AdaptiveEngine(APT_PRESET)
+        for _ in range(5):
+            engine.observe(DOMAIN, BlockSignal.CAPTCHA, 0.9)
+        assert engine.should_reset(DOMAIN) is True
+
+        engine.reset_session(DOMAIN)
+        assert DOMAIN not in engine.stats()  # profile is gone, the history is not
+
+        assert engine.plan(DOMAIN)[0] == FetchLevel.DIRECT
+        stats = engine.stats()[DOMAIN]
+        assert stats["level"] == int(FetchLevel.DIRECT)
+        assert stats["risk"] == 0.0
+        assert stats["reset_count"] == 1

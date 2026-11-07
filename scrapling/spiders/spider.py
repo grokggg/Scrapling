@@ -10,7 +10,8 @@ from anyio import Path as AsyncPath
 from scrapling.spiders.request import Request
 from scrapling.spiders.retry import RetryPolicy
 from scrapling.spiders.engine import CrawlerEngine
-from scrapling.spiders.session import SessionManager
+from scrapling.spiders.session import SessionManager, STATIC_DEFAULT_SID
+from scrapling.spiders.proxy_pool import ProxyPool, ProxyPoolConfig
 from scrapling.core.utils import set_logger, reset_logger
 from scrapling.spiders.result import CrawlResult, CrawlStats
 from scrapling.core._types import Set, Any, Dict, Optional, Union, TYPE_CHECKING, AsyncGenerator
@@ -20,7 +21,9 @@ from scrapling.core._types import Set, Any, Dict, Optional, Union, TYPE_CHECKING
 # are transient — they belong to RetryPolicy in scrapling/spiders/retry.py, so that
 # retry strength is decided by exactly one policy table.
 BLOCKED_CODES = {401, 403, 407, 444}
+
 if TYPE_CHECKING:
+    from scrapling.spiders.adaptive import AdaptiveConfig
     from scrapling.engines.toolbelt.custom import Response
 
 
@@ -81,6 +84,14 @@ class Spider(ABC):
     # first match in declaration order wins, so declare the most specific domain first.
     retry_policy: Optional[RetryPolicy] = None
     retry_policy_overrides: dict[str, RetryPolicy] = {}
+
+    # Adaptive escalation profile for the per-domain fetch ladder.
+    # None means "use ENGINEERING_PRESET"; set to APT_PRESET for aggressive targets.
+    adaptive_config: Optional["AdaptiveConfig"] = None
+
+    # Proxy pool for the PROXY rung. None means the ladder stops at TLS.
+    proxy_pool: Optional[ProxyPool] = None
+    proxy_pool_config: ProxyPoolConfig = ProxyPoolConfig()
 
     start_urls: list[str] = []
     allowed_domains: Set[str] = set()
@@ -176,10 +187,10 @@ class Spider(ABC):
         """Generate initial requests to start the crawl.
 
         By default, this generates Request objects for each URL in `start_urls`
-        using the session manager's default session and `parse()` as callback.
-
+        using `parse()` as callback. The sid is left empty on purpose: the engine pins
+        each request to its own domain's session, so domains never share a cookie jar.
         Override this method for more control over initial requests
-        (e.g., to add custom headers, use different callbacks, etc.)
+        (e.g., to add custom headers, use different callbacks, pin a specific `sid`).
         """
         if not self.start_urls:
             raise RuntimeError(
@@ -187,7 +198,7 @@ class Spider(ABC):
             )
 
         for url in self.start_urls:
-            yield Request(url, sid=self._session_manager.default_session_id)
+            yield Request(url)
 
     @abstractmethod
     async def parse(self, response: "Response") -> AsyncGenerator[Dict[str, Any] | Request | None, None]:
@@ -263,15 +274,24 @@ class Spider(ABC):
         """Configure sessions for this spider.
 
         Override this method to add custom sessions.
-        The default implementation creates a FetcherSession session.
+        The default implementation registers one static session; per-domain static and
+        browser sessions are created lazily by `SessionManager.ensure_domain_session()`
+        as the adaptive ladder moves up.
 
-        The first session added becomes the default for `start_requests()` unless specified otherwise.
+        The first session added becomes the default for `start_requests()` and serves as
+        the fallback for requests without a host.
 
         :param manager: SessionManager to configure
         """
         from scrapling.fetchers import FetcherSession
 
-        manager.add("default", FetcherSession())
+        manager.add(STATIC_DEFAULT_SID, FetcherSession(), default=True)
+
+    def adaptive_stats(self) -> dict:
+        """返回所有域名的自适应状态，用于可观测。"""
+        if self._engine is None or not hasattr(self._engine, "_adaptive_engine"):
+            return {}
+        return self._engine._adaptive_engine.stats()
 
     def pause(self):
         """Request graceful shutdown of the crawling process."""

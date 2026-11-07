@@ -15,6 +15,11 @@ from scrapling.spiders.robotstxt import RobotsTxtManager
 from scrapling.spiders.result import CrawlStats, ItemList
 from scrapling.spiders.throttle import AutoThrottle, parse_retry_after
 from scrapling.spiders.retry import RetryDecision, RetryEngine, RetryPolicy, attempt_of, make_retry
+from scrapling.spiders.adaptive import AdaptiveEngine, FetchLevel
+from scrapling.spiders.presets import ENGINEERING_PRESET
+from scrapling.spiders.signals import BlockSignal, detect_signal
+from scrapling.spiders.session import STATIC_DEFAULT_SID, FINGERPRINT_POOL
+from scrapling.spiders.proxy_pool import ProxyPool, ProxyPoolConfig
 from scrapling.spiders.cache import ResponseCacheManager
 from scrapling.spiders.checkpoint import CheckpointManager, CheckpointData
 from scrapling.core._types import Dict, Union, Optional, TYPE_CHECKING, Any, AsyncGenerator
@@ -46,6 +51,17 @@ class CrawlerEngine:
             crawl_strategy=getattr(spider, "crawl_strategy", "bfs"),
         )
         self.stats = CrawlStats()
+
+        # One adaptive ladder per crawl: level per domain decides which session a request uses.
+        self._adaptive_engine = AdaptiveEngine(getattr(self.spider, "adaptive_config", None) or ENGINEERING_PRESET)
+        # Per-domain isolation only makes sense while the framework's own static default is
+        # in charge. A spider that registers its own sessions owns sid dispatch, and its
+        # "first session added is the default" contract stays untouched.
+        self._per_domain_sessions = self.session_manager.default_session_id == STATIC_DEFAULT_SID
+        # The ladder may escalate the fingerprint (TLS/PROXY rungs); the pool is per-spider.
+        self.session_manager.fingerprint_pool = getattr(self.spider, "fingerprint_pool", FINGERPRINT_POOL)
+        # Proxy pool is opt-in: without it the PROXY rung falls back to TLS.
+        self._proxy_pool: Optional[ProxyPool] = getattr(self.spider, "proxy_pool", None)
 
         if self.spider.robots_txt_obey:
 
@@ -147,11 +163,28 @@ class CrawlerEngine:
     def _normalize_request(self, request: Request) -> None:
         """Normalize request fields before enqueueing.
 
-        Resolves empty sid to the session manager's default session ID.
-        This ensures consistent fingerprinting for requests using the same session.
+        A request without a sid is pinned to its own domain's static session, so two
+        domains never share a cookie jar. Hostless requests fall back to the registered
+        default session. `_process_request` re-resolves the sid from the adaptive ladder
+        right before fetching; this is the enqueue-time floor.
         """
         if not request.sid:
-            request.sid = self.session_manager.default_session_id
+            domain = request.domain or ""
+            # Initial rung is DIRECT (int=0); `_process_request` overrides it with the
+            # domain's current level right before fetching.
+            if domain and self._per_domain_sessions:
+                request.sid = f"static:0:{domain}"
+            else:
+                request.sid = self.session_manager.default_session_id
+
+    @staticmethod
+    def _is_auto_sid(sid: str, domain: str) -> bool:
+        """True for the sids this module derives (`{static|browser}:{level}:{domain}`)."""
+        prefix, _, rest = sid.partition(":")
+        if prefix not in ("static", "browser") or not domain:
+            return False
+        level, _, host = rest.partition(":")
+        return host == domain and level.isdigit()
 
     async def _run_callbacks(self, request: Request, response: Response) -> None:
         """Dispatch response to the request's callback and process yielded items/requests."""
@@ -246,6 +279,39 @@ class CrawlerEngine:
 
         retry_plan = None
 
+        # Resolve the session for this domain at its current ladder level. Done before the
+        # rate limiter so the session exists by the time the worker gets a slot.
+        # An explicit `sid` is the caller's choice and is never overridden; only auto sids
+        # (the ones `_normalize_request` derives from the domain) follow the ladder.
+        domain = request.domain or ""
+        proxy_url = None
+        level = FetchLevel.DIRECT
+        if self._per_domain_sessions and (not request.sid or self._is_auto_sid(request.sid, domain)):
+            # A dead ladder (BROWSER at max risk) starts over: drop every session of this
+            # host, forget the profile, and let this very request run on the fresh DIRECT
+            # rung — the request that tripped the reset is not thrown away.
+            if self._adaptive_engine is not None and self._adaptive_engine.should_reset(domain):
+                await self.session_manager.reset_domain(domain)
+                self._adaptive_engine.reset_session(domain)
+                log.info("session reset: domain=%s", domain)
+
+            level = self._adaptive_engine.plan(domain)[0] if self._adaptive_engine else FetchLevel.DIRECT
+            request.sid = self.session_manager.ensure_domain_session(domain, level)
+
+            if level is FetchLevel.PROXY:
+                proxy_url = self._proxy_pool.acquire(domain) if self._proxy_pool is not None else None
+                if proxy_url is None:
+                    # No pool, or a dry one: the TLS rung is the strongest thing left.
+                    level = FetchLevel.TLS
+                    request.sid = self.session_manager.ensure_domain_session(domain, level)
+                else:
+                    request._session_kwargs["proxy"] = proxy_url
+            elif level is FetchLevel.BROWSER and self._proxy_pool is not None:
+                # A browser session works on its own; a proxy is a bonus, never a fallback trigger.
+                proxy_url = self._proxy_pool.acquire(domain)
+                if proxy_url is not None:
+                    request._session_kwargs["proxy"] = proxy_url
+
         async with self._rate_limiter(request.domain):
             if self._autothrottle:
                 delay = self._autothrottle.delay_for(request.domain, floor)
@@ -261,11 +327,42 @@ class CrawlerEngine:
                 started_at = anyio.current_time()
                 response = await self.session_manager.fetch(request)
                 latency = anyio.current_time() - started_at
+
+                if proxy_url is not None:
+                    self._proxy_pool.release(
+                        proxy_url,
+                        success=200 <= response.status < 400,
+                        latency_ms=latency * 1000,
+                        domain=domain,
+                    )
+
+                # Every response is evidence: a signal feeds the ladder, a clean one buys
+                # a step down. Done before stats so the ladder never depends on counters.
+                if self._adaptive_engine is not None:
+                    signal = detect_signal(response)
+                    if signal.signal is not BlockSignal.NONE:
+                        self._adaptive_engine.observe(domain, signal.signal, signal.confidence)
+                        log.debug(
+                            "signal %s on %s (conf=%.2f): %s",
+                            signal.signal.name,
+                            domain,
+                            signal.confidence,
+                            signal.reason,
+                        )
+                    else:
+                        self._adaptive_engine.observe_success(domain)
+
                 self.stats.increment_requests_count(request.sid or self.session_manager.default_session_id)
                 self.stats.increment_response_bytes(request.domain, len(response.body))
                 self.stats.increment_status(response.status)
 
             except Exception as e:
+                if proxy_url is not None:
+                    self._proxy_pool.release(proxy_url, success=False, domain=domain)
+                # An exception is not proof of anti-bot, but a run of them is a risk of its
+                # own. Low weight on purpose: it accumulates without triggering on its own.
+                if self._adaptive_engine is not None:
+                    self._adaptive_engine.observe(domain, BlockSignal.EMPTY, 0.3)
                 decision, delay = RetryEngine(self._get_policy(request)).decide(request, exc=e)
                 if decision is RetryDecision.GIVE_UP:
                     log.warning(

@@ -118,3 +118,9 @@ crawl.db-shm
 items.jsonl
 audit.jsonl
 metrics.txt
+
+# credentials (never commit)
+.ghtok
+*.ghtok
+.env
+*.token

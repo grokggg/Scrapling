@@ -1,12 +1,62 @@
 from asyncio import Lock
+from random import choice as random_choice
+from threading import Lock as ThreadLock
 
 from scrapling.spiders.request import Request
+from scrapling.spiders.adaptive import FetchLevel
 from scrapling.engines.static import _ASyncSessionLogic
 from scrapling.engines.toolbelt.convertor import Response
 from scrapling.core._types import Set, cast, SUPPORTED_HTTP_METHODS
 from scrapling.fetchers import AsyncStealthySession, FetcherSession
 
 Session = FetcherSession | AsyncStealthySession
+
+# Requests without a host (rare: `Request("")`) still need a registry key.
+NO_DOMAIN = "__default__"
+# The sid `Spider.configure_sessions()` registers by default. Its presence means the
+# framework owns sid dispatch, which is what enables per-domain sessions.
+STATIC_DEFAULT_SID = "static:0:__default__"
+
+# curl_cffi TLS fingerprints. One is drawn per TLS/PROXY session build, so a domain that
+# keeps getting flagged comes back with a different handshake instead of the same one.
+FINGERPRINT_POOL = [
+    "chrome",
+    "chrome110",
+    "chrome116",
+    "chrome120",
+    "safari17_0",
+    "safari17_2_ios",
+    "edge101",
+    "firefox133",
+]
+
+
+def _build_session(level: FetchLevel, fingerprint_pool: "list[str] | None" = None) -> Session:
+    """Create the session that `level` maps to. Never started here — registration is lazy.
+
+    The static rungs differ in what actually goes on the wire, not just in name:
+    DIRECT sends curl_cffi's own headers, HEADERS adds browser-shaped ones, and TLS/PROXY
+    draw a fingerprint from the pool so the handshake itself changes.
+    """
+    if level == FetchLevel.BROWSER:
+        return AsyncStealthySession(headless=True, real_chrome=False, hide_canvas=True, allow_webgl=True)
+    if level == FetchLevel.DIRECT:
+        return FetcherSession(impersonate="chrome", stealthy_headers=False)
+    if level == FetchLevel.HEADERS:
+        return FetcherSession(impersonate="chrome", stealthy_headers=True)
+    # TLS and PROXY: same wire profile, only the proxy differs (per-request `_session_kwargs`).
+    fingerprint = random_choice(fingerprint_pool or FINGERPRINT_POOL)
+    return FetcherSession(impersonate=fingerprint, stealthy_headers=True)
+
+
+def session_sid(domain: str, level: FetchLevel) -> str:
+    """`static:{0..3}:example.com` up to PROXY, `browser:4:example.com` at BROWSER.
+
+    The level is part of the key on purpose: an upgrade must be a new session, not a
+    re-parameterisation of the old one, or the ladder would be a no-op.
+    """
+    prefix = "browser" if level == FetchLevel.BROWSER else "static"
+    return f"{prefix}:{int(level)}:{domain or NO_DOMAIN}"
 
 
 class SessionManager:
@@ -18,6 +68,11 @@ class SessionManager:
         self._started: bool = False
         self._lazy_sessions: Set[str] = set()
         self._lazy_lock = Lock()
+        # Registry mutations happen from sync code (`ensure_domain_session`), so the guard
+        # is a thread lock; `_lazy_lock` still serialises the async `__aenter__` calls.
+        self._registry_lock = ThreadLock()
+        # Overridable fingerprint source; `CrawlerEngine` seeds it from `spider.fingerprint_pool`.
+        self.fingerprint_pool: list[str] = FINGERPRINT_POOL
 
     def add(self, session_id: str, session: Session, *, default: bool = False, lazy: bool = False) -> "SessionManager":
         """Register a session instance.
@@ -39,6 +94,42 @@ class SessionManager:
             self._lazy_sessions.add(session_id)
 
         return self
+
+    def ensure_domain_session(self, domain: str, level: FetchLevel) -> str:
+        """按 domain + level 确保对应 session 存在，返回 sid。
+
+        level == BROWSER → browser:4:{domain}（懒启动 AsyncStealthySession）
+        其它 level → static:{int(level)}:{domain}（懒启动 FetcherSession，带 level 对应参数）
+
+        返回的 sid 可直接赋给 request.sid
+        """
+        sid = session_sid(domain, level)
+        with self._registry_lock:
+            if sid not in self._sessions:
+                self.add(sid, _build_session(level, self.fingerprint_pool), lazy=True)
+        return sid
+
+    async def reset_domain(self, domain: str) -> None:
+        """关闭并移除该域名的所有 session，下次 ensure 会重新创建。
+
+        Matches every level of one host (the last colon-separated field is the domain),
+        never the framework default.
+        """
+        d = domain or NO_DOMAIN
+        with self._registry_lock:
+            doomed = [
+                sid
+                for sid in self._sessions
+                if sid != self._default_session_id and sid.rsplit(":", 1)[-1] == d
+            ]
+            sessions = [self._sessions.pop(sid) for sid in doomed]
+            for sid in doomed:
+                self._lazy_sessions.discard(sid)
+
+        for session in sessions:
+            # Only live sessions can be exited; a registered-but-never-used one is dropped as is.
+            if getattr(session, "_is_alive", False):
+                await session.__aexit__(None, None, None)
 
     def remove(self, session_id: str) -> None:
         """Removes a session.

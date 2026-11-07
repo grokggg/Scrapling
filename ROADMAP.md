@@ -11,4 +11,15 @@
 - [ ] Add the ability to auto-detect schemas in pages and manipulate them.
 - [ ] Add `analyzer` ability that tries to learn about the page through meta-elements and return what it learned
 - [ ] Add the ability to generate a regex from a group of elements (Like for all href attributes)
-- 
+## Progress
+- [x] P1 retry policy
+- [x] P2 signal detection + adaptive
+- [x] P3 session isolation + ladder + reset
+- [x] P4 proxy pool
+- [ ] P5 fingerprint profiles
+- [ ] P6 pacing
+- [ ] P7 render pool
+- [ ] P8 incremental
+- [ ] P9 storage
+- [ ] P10 telemetry
+- [ ] P11 distributed
