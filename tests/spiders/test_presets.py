@@ -239,3 +239,26 @@ class TestAptBrowserPool:
         assert Spider.browser_block_ads is False
         assert Spider.browser_retries == 3
         assert Spider.browser_retry_delay == 1.0
+
+
+class TestAptResourceProfile:
+    def test_apt_spider_uses_the_speed_profile_and_blocks_analytics(self):
+        from scrapling.spiders.presets import make_apt_spider
+        from scrapling.spiders.spider import Spider
+
+        class Probe(make_apt_spider(Spider)):
+            name = "apt_profile_probe"
+
+            async def parse(self, response):
+                yield None
+
+        spider = Probe()
+
+        assert spider.browser_resource_profile == "speed"
+        assert spider.browser_block_analytics is True
+
+    def test_plain_spiders_block_nothing(self):
+        from scrapling.spiders.spider import Spider
+
+        assert Spider.browser_resource_profile == "none"
+        assert Spider.browser_block_analytics is False

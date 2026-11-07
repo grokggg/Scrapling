@@ -108,6 +108,8 @@ class Spider(ABC):
     browser_block_ads: bool = False
     browser_retries: int = 3
     browser_retry_delay: float = 1.0
+    browser_resource_profile: str = "none"  # none / speed / fidelity
+    browser_block_analytics: bool = False
 
     start_urls: list[str] = []
     allowed_domains: Set[str] = set()

@@ -107,6 +107,8 @@ def make_apt_spider(base_class):
         browser_block_ads = True  # 3526 个广告/追踪域名
         browser_retries = 2  # 比默认 3 少，因为失败时 P7 第三批会降级
         browser_retry_delay = 0.5
+        browser_resource_profile = "speed"  # 速度档，不再一刀切
+        browser_block_analytics = True
 
         # 代理池按需注入（proxy_pool 仍为 None），但池策略更激进
         proxy_pool_config = ProxyPoolConfig(

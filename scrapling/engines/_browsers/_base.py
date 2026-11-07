@@ -138,6 +138,9 @@ class SyncSession:
         disable_resources: bool,
         blocked_domains: Optional[Set[str]] = None,
         context: Optional[BrowserContext] = None,
+        *,
+        resource_profile: str = "none",
+        block_analytics: bool = False,
     ) -> PageInfo[Page]:  # pragma: no cover
         """Get a ready page from the pool, or open a new one"""
         page_info = self.page_pool.get_ready_page() if context is None else None
@@ -151,8 +154,16 @@ class SyncSession:
         page.set_default_timeout(timeout)
         page.set_extra_http_headers(extra_headers or {})
         page.unroute_all(behavior="ignoreErrors")
-        if disable_resources or blocked_domains:
-            page.route("**/*", create_intercept_handler(disable_resources, blocked_domains))
+        if disable_resources or blocked_domains or resource_profile != "none" or block_analytics:
+            page.route(
+                "**/*",
+                create_intercept_handler(
+                    disable_resources,
+                    blocked_domains,
+                    resource_profile=resource_profile,
+                    block_analytics=block_analytics,
+                ),
+            )
         return cast(PageInfo[Page], page_info)
 
     def get_pool_stats(self) -> Dict[str, int]:
@@ -221,6 +232,9 @@ class SyncSession:
         disable_resources: bool,
         proxy: Optional[ProxyType] = None,
         blocked_domains: Optional[Set[str]] = None,
+        *,
+        resource_profile: str = "none",
+        block_analytics: bool = False,
     ) -> Generator["PageInfo[Page]", None, None]:
         """Acquire a page - either from persistent context or fresh context with proxy."""
         if proxy:
@@ -233,7 +247,15 @@ class SyncSession:
             page_info = None
             try:
                 context = self._initialize_context(self._config, context)
-                page_info = self._get_page(timeout, extra_headers, disable_resources, blocked_domains, context=context)
+                page_info = self._get_page(
+                    timeout,
+                    extra_headers,
+                    disable_resources,
+                    blocked_domains,
+                    context=context,
+                    resource_profile=resource_profile,
+                    block_analytics=block_analytics,
+                )
                 yield page_info
             finally:
                 if page_info is not None:
@@ -242,7 +264,14 @@ class SyncSession:
                 context.close()
         else:
             # Standard mode: use PagePool with persistent context
-            page_info = self._get_page(timeout, extra_headers, disable_resources, blocked_domains)
+            page_info = self._get_page(
+                timeout,
+                extra_headers,
+                disable_resources,
+                blocked_domains,
+                resource_profile=resource_profile,
+                block_analytics=block_analytics,
+            )
             try:
                 yield page_info
             finally:
@@ -352,6 +381,9 @@ class AsyncSession:
         disable_resources: bool,
         blocked_domains: Optional[Set[str]] = None,
         context: Optional[AsyncBrowserContext] = None,
+        *,
+        resource_profile: str = "none",
+        block_analytics: bool = False,
     ) -> PageInfo[AsyncPage]:  # pragma: no cover
         """Get a ready page from the pool, or open a new one"""
         ctx = context if context is not None else self.context
@@ -391,8 +423,16 @@ class AsyncSession:
             page.set_default_timeout(timeout)
             await page.set_extra_http_headers(extra_headers or {})
             await page.unroute_all(behavior="ignoreErrors")
-            if disable_resources or blocked_domains:
-                await page.route("**/*", create_async_intercept_handler(disable_resources, blocked_domains))
+            if disable_resources or blocked_domains or resource_profile != "none" or block_analytics:
+                await page.route(
+                    "**/*",
+                    create_async_intercept_handler(
+                        disable_resources,
+                        blocked_domains,
+                        resource_profile=resource_profile,
+                        block_analytics=block_analytics,
+                    ),
+                )
             return cast(PageInfo[AsyncPage], page_info)
         except BaseException:
             # Handed back only on failure; on success the slot travels with the page and is
@@ -468,6 +508,9 @@ class AsyncSession:
         disable_resources: bool,
         proxy: Optional[ProxyType] = None,
         blocked_domains: Optional[Set[str]] = None,
+        *,
+        resource_profile: str = "none",
+        block_analytics: bool = False,
     ) -> AsyncGenerator["PageInfo[AsyncPage]", None]:
         """Acquire a page - either from persistent context or fresh context with proxy."""
         if proxy:
@@ -481,7 +524,13 @@ class AsyncSession:
             try:
                 context = await self._initialize_context(self._config, context)
                 page_info = await self._get_page(
-                    timeout, extra_headers, disable_resources, blocked_domains, context=context
+                    timeout,
+                    extra_headers,
+                    disable_resources,
+                    blocked_domains,
+                    context=context,
+                    resource_profile=resource_profile,
+                    block_analytics=block_analytics,
                 )
                 yield page_info
             finally:
@@ -495,7 +544,14 @@ class AsyncSession:
                     self._page_sem.release()
         else:
             # Standard mode: use PagePool with persistent context
-            page_info = await self._get_page(timeout, extra_headers, disable_resources, blocked_domains)
+            page_info = await self._get_page(
+                timeout,
+                extra_headers,
+                disable_resources,
+                blocked_domains,
+                resource_profile=resource_profile,
+                block_analytics=block_analytics,
+            )
             try:
                 yield page_info
             finally:

@@ -46,6 +46,8 @@ def _build_session(
             block_ads=getattr(spider_config, "browser_block_ads", False),
             retries=getattr(spider_config, "browser_retries", 3),
             retry_delay=getattr(spider_config, "browser_retry_delay", 1),
+            resource_profile=getattr(spider_config, "browser_resource_profile", "none"),
+            block_analytics=getattr(spider_config, "browser_block_analytics", False),
             headless=True,
             real_chrome=False,
             hide_canvas=True,

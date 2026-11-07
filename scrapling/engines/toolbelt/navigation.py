@@ -10,7 +10,7 @@ from patchright.sync_api import Route
 
 from scrapling.core.utils import log
 from scrapling.core._types import Dict, Set, Tuple, Optional, Callable
-from scrapling.engines.constants import EXTRA_RESOURCES
+from scrapling.engines.toolbelt.resource_profiles import should_block
 
 
 class ProxyDict(Struct):
@@ -40,24 +40,37 @@ def _is_domain_blocked(hostname: str, domains: frozenset) -> bool:
     return False
 
 
-def create_intercept_handler(disable_resources: bool, blocked_domains: Optional[Set[str]] = None) -> Callable:
-    """Create a route handler that blocks both resource types and specific domains.
+def create_intercept_handler(
+    disable_resources: bool = False,
+    blocked_domains: Optional[Set[str]] = None,
+    *,
+    resource_profile: str = "none",
+    block_analytics: bool = False,
+) -> Callable:
+    """Create a route handler that blocks resource types, analytics and specific domains.
 
-    :param disable_resources: Whether to block default resource types.
+    :param disable_resources: Legacy all-or-nothing switch; when True and no profile is given
+        it means ``resource_profile="speed"``.
     :param blocked_domains: Set of domain names to block requests to.
+    :param resource_profile: One of ``none`` / ``speed`` / ``fidelity``.
+    :param block_analytics: Also abort requests whose URL matches the analytics patterns.
     :return: A sync route handler function.
     """
-    disabled_resources = EXTRA_RESOURCES if disable_resources else set()
+    if disable_resources and resource_profile == "none":
+        resource_profile = "speed"
     domains = frozenset(blocked_domains) if blocked_domains else frozenset()
 
     def handler(route: Route):
-        if route.request.resource_type in disabled_resources:
-            log.debug(f'Blocking background resource "{route.request.url}" of type "{route.request.resource_type}"')
+        request = route.request
+        if should_block(
+            request.url, request.resource_type, resource_profile=resource_profile, block_analytics=block_analytics
+        ):
+            log.debug(f'Blocking resource "{request.url}" of type "{request.resource_type}"')
             route.abort()
         elif domains:
-            hostname = urlparse(route.request.url).hostname or ""
+            hostname = urlparse(request.url).hostname or ""
             if _is_domain_blocked(hostname, domains):
-                log.debug(f'Blocking request to blocked domain "{hostname}" ({route.request.url})')
+                log.debug(f'Blocking request to blocked domain "{hostname}" ({request.url})')
                 route.abort()
             else:
                 route.continue_()
@@ -67,24 +80,37 @@ def create_intercept_handler(disable_resources: bool, blocked_domains: Optional[
     return handler
 
 
-def create_async_intercept_handler(disable_resources: bool, blocked_domains: Optional[Set[str]] = None) -> Callable:
-    """Create an async route handler that blocks both resource types and specific domains.
+def create_async_intercept_handler(
+    disable_resources: bool = False,
+    blocked_domains: Optional[Set[str]] = None,
+    *,
+    resource_profile: str = "none",
+    block_analytics: bool = False,
+) -> Callable:
+    """Create an async route handler that blocks resource types, analytics and specific domains.
 
-    :param disable_resources: Whether to block default resource types.
+    :param disable_resources: Legacy all-or-nothing switch; when True and no profile is given
+        it means ``resource_profile="speed"``.
     :param blocked_domains: Set of domain names to block requests to.
+    :param resource_profile: One of ``none`` / ``speed`` / ``fidelity``.
+    :param block_analytics: Also abort requests whose URL matches the analytics patterns.
     :return: An async route handler function.
     """
-    disabled_resources = EXTRA_RESOURCES if disable_resources else set()
+    if disable_resources and resource_profile == "none":
+        resource_profile = "speed"
     domains = frozenset(blocked_domains) if blocked_domains else frozenset()
 
     async def handler(route: async_Route):
-        if route.request.resource_type in disabled_resources:
-            log.debug(f'Blocking background resource "{route.request.url}" of type "{route.request.resource_type}"')
+        request = route.request
+        if should_block(
+            request.url, request.resource_type, resource_profile=resource_profile, block_analytics=block_analytics
+        ):
+            log.debug(f'Blocking resource "{request.url}" of type "{request.resource_type}"')
             await route.abort()
         elif domains:
-            hostname = urlparse(route.request.url).hostname or ""
+            hostname = urlparse(request.url).hostname or ""
             if _is_domain_blocked(hostname, domains):
-                log.debug(f'Blocking request to blocked domain "{hostname}" ({route.request.url})')
+                log.debug(f'Blocking request to blocked domain "{hostname}" ({request.url})')
                 await route.abort()
             else:
                 await route.continue_()

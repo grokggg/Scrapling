@@ -265,7 +265,13 @@ class StealthySession(SyncSession, StealthySessionMixin):
                 proxy = static_proxy
 
             with self._page_generator(
-                params.timeout, params.extra_headers, params.disable_resources, proxy, params.blocked_domains
+                params.timeout,
+                params.extra_headers,
+                params.disable_resources,
+                proxy,
+                params.blocked_domains,
+                resource_profile=params.resource_profile,
+                block_analytics=params.block_analytics,
             ) as page_info:
                 final_response: List = [None]
                 page = page_info.page
@@ -583,7 +589,13 @@ class AsyncStealthySession(AsyncSession, StealthySessionMixin):
                 proxy = static_proxy
 
             async with self._page_generator(
-                params.timeout, params.extra_headers, params.disable_resources, proxy, params.blocked_domains
+                params.timeout,
+                params.extra_headers,
+                params.disable_resources,
+                proxy,
+                params.blocked_domains,
+                resource_profile=params.resource_profile,
+                block_analytics=params.block_analytics,
             ) as page_info:
                 final_response: List = [None]
                 page = page_info.page

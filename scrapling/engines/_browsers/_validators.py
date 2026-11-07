@@ -21,6 +21,7 @@ from scrapling.core._types import (
 )
 from scrapling.engines.toolbelt.proxy_rotation import ProxyRotator
 from scrapling.engines.toolbelt.navigation import construct_proxy_dict
+from scrapling.engines.toolbelt.resource_profiles import PROFILE_NAMES
 from scrapling.engines._browsers._types import PlaywrightFetchParams, StealthFetchParams
 
 
@@ -62,6 +63,8 @@ class PlaywrightConfig(Struct, kw_only=True, frozen=False, weakref=True):
     max_pages: PagesCount = 1
     headless: bool = True
     disable_resources: bool = False
+    resource_profile: str = "none"
+    block_analytics: bool = False
     network_idle: bool = False
     load_dom: bool = True
     pierce_shadow: bool = False
@@ -96,6 +99,8 @@ class PlaywrightConfig(Struct, kw_only=True, frozen=False, weakref=True):
 
     def __post_init__(self):  # pragma: no cover
         """Custom validation after msgspec validation"""
+        if self.resource_profile not in PROFILE_NAMES:
+            raise ValueError(f"resource_profile must be one of {'/'.join(PROFILE_NAMES)}, got {self.resource_profile}")
         if self.page_action and not callable(self.page_action):
             raise TypeError(f"page_action must be callable, got {type(self.page_action).__name__}")
         if self.page_setup and not callable(self.page_setup):

@@ -400,3 +400,43 @@ class TestBrowserRenderPool:
         CrawlerEngine(spider, hand_made)
 
         assert hand_made._spider is spider
+
+
+class TestBrowserResourceProfile:
+    def test_the_spider_profile_reaches_the_browser_session(self):
+        from scrapling.spiders.adaptive import FetchLevel
+        from scrapling.spiders.spider import Spider
+
+        class Faithful(Spider):
+            name = "faithful"
+            start_urls = ["https://example.com/"]
+            browser_resource_profile = "fidelity"
+            browser_block_analytics = True
+
+            async def parse(self, response):
+                yield None
+
+        spider = Faithful()
+        sid = spider._session_manager.ensure_domain_session("example.com", FetchLevel.BROWSER)
+        session = spider._session_manager.get(sid)
+
+        assert session._config.resource_profile == "fidelity"
+        assert session._config.block_analytics is True
+
+    def test_defaults_leave_the_session_untouched(self):
+        from scrapling.spiders.adaptive import FetchLevel
+        from scrapling.spiders.spider import Spider
+
+        class Plain(Spider):
+            name = "plain_res"
+            start_urls = ["https://example.com/"]
+
+            async def parse(self, response):
+                yield None
+
+        spider = Plain()
+        sid = spider._session_manager.ensure_domain_session("example.com", FetchLevel.BROWSER)
+        config = spider._session_manager.get(sid)._config
+
+        assert config.resource_profile == "none"
+        assert config.block_analytics is False
