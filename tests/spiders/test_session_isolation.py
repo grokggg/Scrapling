@@ -8,7 +8,11 @@ from scrapling.fetchers import AsyncStealthySession, FetcherSession
 from scrapling.spiders import session as session_module
 from scrapling.spiders.adaptive import AdaptiveEngine, FetchLevel
 from scrapling.spiders.presets import APT_PRESET
+from scrapling.spiders.fingerprint import DEFAULT_FINGERPRINTS
 from scrapling.spiders.session import FINGERPRINT_POOL, SessionManager, session_sid
+
+# impersonate → profile（edge101 是 curl_cffi 里 Edge 的唯一入口，映射唯一）
+FINGERPRINT_LOOKUP = {fp.impersonate: fp for fp in DEFAULT_FINGERPRINTS}
 from scrapling.spiders.signals import BlockSignal
 
 DOMAIN = "example.com"
@@ -51,7 +55,8 @@ class TestSidNaming:
         assert session_sid("", FetchLevel.BROWSER) == "browser:4:__default__"
 
     def test_pool_has_enough_fingerprints(self):
-        assert len(FINGERPRINT_POOL) >= 8
+        assert len(FINGERPRINT_POOL) == 5
+        assert {"chrome120", "safari17_2_ios", "firefox133"} <= set(FINGERPRINT_POOL.all_names())
 
 
 class TestEnsure:
@@ -150,31 +155,42 @@ class TestUpgradeAllocatesANewSession:
 
 
 class TestFingerprintRotation:
-    def test_tls_rung_draws_from_the_pool_and_varies(self, monkeypatch):
-        picks = iter(FINGERPRINT_POOL * 2)
-        monkeypatch.setattr(session_module, "random_choice", lambda pool: next(picks))
+    def test_tls_rung_pins_one_whole_profile_per_domain(self):
+        session = session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL, DOMAIN)
 
-        seen = {session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL)._default_impersonate for _ in range(6)}
+        profile = FINGERPRINT_LOOKUP[session._default_impersonate]
+        assert session._default_headers == profile.to_headers()
+        assert session._stealth is True
 
-        assert len(seen) >= 2
-        assert seen <= set(FINGERPRINT_POOL)
+    def test_rebuilding_the_same_domain_is_deterministic(self):
+        first = session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL, DOMAIN)
+        again = session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL, DOMAIN)
 
-    def test_tls_and_proxy_share_the_rotating_profile(self, monkeypatch):
-        monkeypatch.setattr(session_module, "random_choice", lambda pool: "firefox133")
+        assert first._default_impersonate == again._default_impersonate
+        assert first._default_headers == again._default_headers
 
-        tls = session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL)
-        proxy = session_module._build_session(FetchLevel.PROXY, FINGERPRINT_POOL)
+    def test_the_salt_walks_to_another_profile(self):
+        base = session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL, DOMAIN)
+        rotated = session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL, DOMAIN, salt=1)
 
-        assert tls._default_impersonate == proxy._default_impersonate == "firefox133"
+        assert rotated._default_impersonate != base._default_impersonate
+
+    def test_tls_and_proxy_share_the_profile(self):
+        tls = session_module._build_session(FetchLevel.TLS, FINGERPRINT_POOL, DOMAIN)
+        proxy = session_module._build_session(FetchLevel.PROXY, FINGERPRINT_POOL, DOMAIN)
+
+        assert tls._default_impersonate == proxy._default_impersonate
+        assert tls._default_headers == proxy._default_headers
         assert tls._stealth is proxy._stealth is True
 
-    def test_manager_uses_its_own_pool(self):
+    def test_manager_accepts_a_named_pool(self):
         manager = SessionManager()
-        manager.fingerprint_pool = ["firefox133"]
+        manager.fingerprint_pool = [FINGERPRINT_LOOKUP["firefox133"]]
 
         session = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.TLS))
 
         assert session._default_impersonate == "firefox133"
+        assert "Firefox/133.0" in session._default_headers["User-Agent"]
 
 
 class TestReset:
@@ -233,3 +249,92 @@ class TestReset:
         await manager.reset_domain(DOMAIN)  # must not raise "Cannot exit invalid session"
 
         assert sid not in manager
+
+
+class TestFingerprintBinding:
+    """The TLS/PROXY rungs must pin a whole browser, not just a TLS string."""
+
+    def test_rebuilds_after_reset_rotate_the_profile(self):
+        manager = SessionManager()
+        seen = []
+
+        async def rebuild():
+            sid = manager.ensure_domain_session(DOMAIN, FetchLevel.TLS)
+            seen.append(manager.get(sid)._default_impersonate)
+            await manager.reset_domain(DOMAIN)
+
+        import anyio
+
+        for _ in range(10):
+            anyio.run(rebuild)
+
+        assert len(seen) == 10
+        assert len(set(seen)) >= 2
+
+    def test_same_domain_without_reset_keeps_the_profile(self):
+        manager = SessionManager()
+        first = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.TLS))._default_impersonate
+
+        for _ in range(5):
+            sid = manager.ensure_domain_session(DOMAIN, FetchLevel.TLS)
+            assert manager.get(sid)._default_impersonate == first
+
+    def test_direct_sets_no_extra_headers(self):
+        manager = SessionManager()
+        session = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.DIRECT))
+
+        assert session._stealth is False
+        assert not session._default_headers
+
+    def test_headers_rung_shapes_headers_but_keeps_the_default_ua(self):
+        manager = SessionManager()
+        session = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.HEADERS))
+
+        assert session._stealth is True
+        assert not session._default_headers
+
+    def test_tls_rung_pins_ua_language_and_client_hints(self):
+        manager = SessionManager()
+        session = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.TLS))
+        headers = session._default_headers
+
+        assert session._stealth is True
+        assert headers["User-Agent"].startswith("Mozilla/5.0")
+        assert "Accept-Language" in headers
+        assert "Accept-Encoding" in headers
+
+    def test_tls_profile_matches_its_impersonate(self):
+        manager = SessionManager()
+        session = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.TLS))
+        profile = FINGERPRINT_LOOKUP[session._default_impersonate]
+
+        assert session._default_headers == profile.to_headers()
+
+    def test_proxy_rung_uses_the_same_profiles_as_tls(self):
+        manager = SessionManager()
+        tls = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.TLS))
+        proxy = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.PROXY))
+
+        assert proxy._default_impersonate == tls._default_impersonate
+        assert proxy._default_headers == tls._default_headers
+
+    def test_spider_pool_reaches_the_manager(self):
+        from scrapling.spiders.fingerprint import APT_FINGERPRINTS, FingerprintPool
+
+        manager = SessionManager()
+        manager.fingerprint_pool = FingerprintPool(APT_FINGERPRINTS)
+        session = manager.get(manager.ensure_domain_session(DOMAIN, FetchLevel.TLS))
+
+        assert session._default_impersonate in {fp.impersonate for fp in APT_FINGERPRINTS}
+
+    def test_setting_none_restores_the_default_pool(self):
+        manager = SessionManager()
+        manager.fingerprint_pool = None
+
+        assert manager.fingerprint_pool.all_names() == [
+            "chrome120",
+            "chrome131",
+            "safari17_2_ios",
+            "firefox133",
+            "edge131",
+        ]

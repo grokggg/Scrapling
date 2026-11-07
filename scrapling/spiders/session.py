@@ -1,5 +1,4 @@
 from asyncio import Lock
-from random import choice as random_choice
 from threading import Lock as ThreadLock
 
 from scrapling.spiders.request import Request
@@ -8,6 +7,7 @@ from scrapling.engines.static import _ASyncSessionLogic
 from scrapling.engines.toolbelt.convertor import Response
 from scrapling.core._types import Set, cast, SUPPORTED_HTTP_METHODS
 from scrapling.fetchers import AsyncStealthySession, FetcherSession
+from scrapling.spiders.fingerprint import DEFAULT_FINGERPRINTS, BrowserFingerprint, FingerprintPool
 
 Session = FetcherSession | AsyncStealthySession
 
@@ -17,26 +17,24 @@ NO_DOMAIN = "__default__"
 # framework owns sid dispatch, which is what enables per-domain sessions.
 STATIC_DEFAULT_SID = "static:0:__default__"
 
-# curl_cffi TLS fingerprints. One is drawn per TLS/PROXY session build, so a domain that
-# keeps getting flagged comes back with a different handshake instead of the same one.
-FINGERPRINT_POOL = [
-    "chrome",
-    "chrome110",
-    "chrome116",
-    "chrome120",
-    "safari17_0",
-    "safari17_2_ios",
-    "edge101",
-    "firefox133",
-]
+# Profiles, not bare impersonate strings: the TLS handshake and the HTTP headers now come
+# from the same real browser. Kept under the old name because `CrawlerEngine` seeds
+# `SessionManager.fingerprint_pool` with it; the setter below accepts a pool, a list of
+# names, or None.
+FINGERPRINT_POOL = FingerprintPool(DEFAULT_FINGERPRINTS)
 
 
-def _build_session(level: FetchLevel, fingerprint_pool: "list[str] | None" = None) -> Session:
+def _build_session(
+    level: FetchLevel,
+    fingerprint_pool: "FingerprintPool | None" = None,
+    domain: str = "",
+    salt: int = 0,
+) -> Session:
     """Create the session that `level` maps to. Never started here — registration is lazy.
 
     The static rungs differ in what actually goes on the wire, not just in name:
     DIRECT sends curl_cffi's own headers, HEADERS adds browser-shaped ones, and TLS/PROXY
-    draw a fingerprint from the pool so the handshake itself changes.
+    pin a whole browser profile so the handshake and the headers cannot disagree.
     """
     if level == FetchLevel.BROWSER:
         return AsyncStealthySession(headless=True, real_chrome=False, hide_canvas=True, allow_webgl=True)
@@ -45,8 +43,12 @@ def _build_session(level: FetchLevel, fingerprint_pool: "list[str] | None" = Non
     if level == FetchLevel.HEADERS:
         return FetcherSession(impersonate="chrome", stealthy_headers=True)
     # TLS and PROXY: same wire profile, only the proxy differs (per-request `_session_kwargs`).
-    fingerprint = random_choice(fingerprint_pool or FINGERPRINT_POOL)
-    return FetcherSession(impersonate=fingerprint, stealthy_headers=True)
+    profile = (fingerprint_pool or FINGERPRINT_POOL).pick_for_domain(domain, "sticky", salt=salt)
+    return FetcherSession(
+        impersonate=profile.impersonate,
+        stealthy_headers=True,
+        headers=profile.to_headers(),
+    )
 
 
 def session_sid(domain: str, level: FetchLevel) -> str:
@@ -62,7 +64,7 @@ def session_sid(domain: str, level: FetchLevel) -> str:
 class SessionManager:
     """Manages pre-configured session instances."""
 
-    def __init__(self) -> None:
+    def __init__(self, fingerprint_pool: "FingerprintPool | None" = None) -> None:
         self._sessions: dict[str, Session] = {}
         self._default_session_id: str | None = None
         self._started: bool = False
@@ -72,7 +74,25 @@ class SessionManager:
         # is a thread lock; `_lazy_lock` still serialises the async `__aenter__` calls.
         self._registry_lock = ThreadLock()
         # Overridable fingerprint source; `CrawlerEngine` seeds it from `spider.fingerprint_pool`.
-        self.fingerprint_pool: list[str] = FINGERPRINT_POOL
+        self._fingerprint_pool: FingerprintPool = fingerprint_pool or FINGERPRINT_POOL
+        # Bumped per reset so a rebuilt session does not get the burnt profile back.
+        self._fingerprint_rotation: dict[str, int] = {}
+
+    @property
+    def fingerprint_pool(self) -> FingerprintPool:
+        return self._fingerprint_pool
+
+    @fingerprint_pool.setter
+    def fingerprint_pool(self, value: "FingerprintPool | list | None") -> None:
+        """Accept a pool, profile objects, or profile names — None means the default set."""
+        if value is None:
+            self._fingerprint_pool = FINGERPRINT_POOL
+        elif isinstance(value, FingerprintPool):
+            self._fingerprint_pool = value
+        else:
+            self._fingerprint_pool = FingerprintPool(
+                item if isinstance(item, BrowserFingerprint) else FINGERPRINT_POOL.get(item) for item in value
+            )
 
     def add(self, session_id: str, session: Session, *, default: bool = False, lazy: bool = False) -> "SessionManager":
         """Register a session instance.
@@ -106,7 +126,13 @@ class SessionManager:
         sid = session_sid(domain, level)
         with self._registry_lock:
             if sid not in self._sessions:
-                self.add(sid, _build_session(level, self.fingerprint_pool), lazy=True)
+                salt = self._fingerprint_rotation.get(domain or NO_DOMAIN, 0)
+                previous_default = self._default_session_id
+                self.add(sid, _build_session(level, self._fingerprint_pool, domain, salt), lazy=True)
+                # A lazily ensured session must never steal the default slot: `reset_domain`
+                # spares the default, so hijacking it would leave a burnt session alive.
+                if previous_default is None:
+                    self._default_session_id = None
         return sid
 
     async def reset_domain(self, domain: str) -> None:
@@ -125,6 +151,8 @@ class SessionManager:
             sessions = [self._sessions.pop(sid) for sid in doomed]
             for sid in doomed:
                 self._lazy_sessions.discard(sid)
+            # Next build for this host picks a different profile than the one that just died.
+            self._fingerprint_rotation[d] = self._fingerprint_rotation.get(d, 0) + 1
 
         for session in sessions:
             # Only live sessions can be exited; a registered-but-never-used one is dropped as is.

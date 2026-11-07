@@ -46,6 +46,7 @@ def make_apt_spider(base_class):
             start_urls = ["https://target.example"]
     """
     from scrapling.spiders.adaptive import AdaptiveConfig  # noqa: F401  (documented import path)
+    from scrapling.spiders.fingerprint import APT_FINGERPRINTS, FingerprintPool
     from scrapling.spiders.proxy_pool import ProxyPoolConfig
     from scrapling.spiders.retry import RetryPolicy
 
@@ -58,6 +59,9 @@ def make_apt_spider(base_class):
 
         # 自适应激进档
         adaptive_config = APT_PRESET
+
+        # 指纹池：5 个浏览器 + 3 个 macOS 变体，同一域名粘一个，reset 后才换
+        fingerprint_pool = FingerprintPool(APT_FINGERPRINTS)
 
         # 代理池按需注入（proxy_pool 仍为 None），但池策略更激进
         proxy_pool_config = ProxyPoolConfig(
@@ -80,23 +84,5 @@ def make_apt_spider(base_class):
             respect_retry_after=True,
             max_retry_after=600.0,
         )
-
-        # 指纹池加大
-        fingerprint_pool = [
-            "chrome",
-            "chrome110",
-            "chrome116",
-            "chrome120",
-            "safari17_0",
-            "safari17_2_ios",
-            "edge101",
-            "firefox133",
-            "firefox130",
-            "chrome124",
-            "chrome126",
-            "chrome128",
-            "safari18_0",
-            "safari18_1_ios",
-        ]
 
     return _APTSpider
