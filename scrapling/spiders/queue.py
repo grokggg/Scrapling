@@ -4,19 +4,16 @@
 queue out so a backend can be swapped the same way ``Store`` is: pick an implementation, hand
 it to the engine, and the crawl loop does not learn a single new name.
 
-Two things about this contract are deliberately *not* the textbook shape, because the engine
-already calls them that way and P11-A must not touch ``engine.py``:
+Every method that can touch a backend is ``async`` — including ``complete``, ``snapshot`` and
+``restore``, which the engine awaits (``engine.py:695``, ``:719``, ``:747``). A PostgreSQL queue
+can therefore write its ack and read its checkpoint inside the same contract, with no further
+change to the engine.
 
-* ``complete``, ``snapshot`` and ``restore`` are **synchronous** — ``CrawlerEngine`` calls them
-  without ``await`` (``engine.py:695``, ``:719``, ``:747``).
-* ``is_empty`` means "nothing left to hand out right now", i.e. the queue itself is empty. It
-  does **not** include in-flight work: the crawl loop pairs it with its own ``_active_tasks``
-  counter (``engine.py:847`` → ``:860``), and a queue that reported ``is_empty`` as False while
-  a worker was still busy would send the loop into a blocking ``dequeue()`` on an empty queue.
-
-A queue backed by the network therefore cannot implement this Protocol by awaiting a round trip
-inside ``complete`` or ``snapshot``. Either it buffers those writes locally, or the engine grows
-three awaits in P11-C. That is a decision for that batch, not a hidden detail of this one.
+``is_empty`` stays synchronous and means "nothing left to hand out right now", i.e. the queue
+itself is empty. It deliberately does **not** include in-flight work: the crawl loop pairs it
+with its own ``_active_tasks`` counter (``engine.py:847`` → ``:860``), and a queue reporting
+``is_empty`` as False while a worker was still busy would send the loop into a blocking
+``dequeue()`` on an empty queue.
 
 In-flight bookkeeping is keyed by ``request.fingerprint``, never ``id(request)``: the same URL
 seen from another process must resolve to the same record, and ``Request.update_fingerprint``
@@ -42,7 +39,7 @@ class Queue(Protocol):
         """Take the next request. Blocks while the queue is empty; the backend decides."""
         ...
 
-    def complete(self, request: Request) -> None:
+    async def complete(self, request: Request) -> None:
         """Release the in-flight slot for this request, keyed by its fingerprint."""
         ...
 
@@ -51,10 +48,10 @@ class Queue(Protocol):
         """True when the queue holds nothing to hand out (in-flight work is not counted)."""
         ...
 
-    def snapshot(self) -> Any:
+    async def snapshot(self) -> Any:
         """Serialise the pending requests and the seen set, for checkpoints."""
         ...
 
-    def restore(self, data: Any) -> None:
+    async def restore(self, data: Any) -> None:
         """Rebuild state from a snapshot. The snapshot format is the backend's business."""
         ...

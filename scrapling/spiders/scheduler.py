@@ -6,7 +6,7 @@ constructs it by name and because every existing import of ``Scheduler`` should 
 it forwards, it does not decide anything.
 """
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from scrapling.spiders.queues.memory import MemoryQueue
 from scrapling.spiders.request import Request
@@ -23,12 +23,13 @@ class Scheduler:
 
     def __init__(
         self,
+        backend: Optional[Any] = None,
         include_kwargs: bool = False,
         include_headers: bool = False,
         keep_fragments: bool = False,
         crawl_strategy: Literal["bfs", "dfs"] = "bfs",
     ):
-        self._backend: Any = MemoryQueue(
+        self._backend: Any = backend if backend is not None else MemoryQueue(
             include_kwargs=include_kwargs,
             include_headers=include_headers,
             keep_fragments=keep_fragments,
@@ -41,8 +42,8 @@ class Scheduler:
     async def dequeue(self) -> Request:
         return await self._backend.dequeue()
 
-    def complete(self, request: Request) -> None:
-        return self._backend.complete(request)
+    async def complete(self, request: Request) -> None:
+        return await self._backend.complete(request)
 
     def __len__(self) -> int:
         return len(self._backend)
@@ -51,8 +52,8 @@ class Scheduler:
     def is_empty(self) -> bool:
         return self._backend.is_empty
 
-    def snapshot(self) -> Any:
-        return self._backend.snapshot()
+    async def snapshot(self) -> Any:
+        return await self._backend.snapshot()
 
-    def restore(self, data: "CheckpointData") -> None:
-        return self._backend.restore(data)
+    async def restore(self, data: "CheckpointData") -> None:
+        return await self._backend.restore(data)

@@ -77,7 +77,7 @@ class MemoryQueue:
         self._inflight.setdefault(self._fingerprint(request), []).append(counter)
         return request
 
-    def complete(self, request: Request) -> None:
+    async def complete(self, request: Request) -> None:
         """Mark a request as finished so it stops being tracked for checkpoints."""
         fingerprint = self._fingerprint(request)
         counters = self._inflight.get(fingerprint)
@@ -95,13 +95,13 @@ class MemoryQueue:
     def is_empty(self) -> bool:
         return self._queue.empty()
 
-    def snapshot(self) -> Tuple[List[Request], Set[bytes]]:
+    async def snapshot(self) -> Tuple[List[Request], Set[bytes]]:
         """Create a snapshot of the current state for checkpoints."""
         sorted_items = sorted(self._pending.values(), key=lambda x: (x[0], x[1]))  # Maintain queue order
         requests = [item[2] for item in sorted_items]
         return requests, self._seen.copy()
 
-    def restore(self, data: "CheckpointData") -> None:
+    async def restore(self, data: "CheckpointData") -> None:
         """Restore scheduler state from checkpoint data.
 
         :param data: CheckpointData containing requests and seen set

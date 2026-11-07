@@ -35,17 +35,17 @@ class TestSchedulerOrder:
             await scheduler.enqueue(request)
         first = await scheduler.dequeue()
         assert first is requests[2]
-        scheduler.complete(first)
+        await scheduler.complete(first)
         await scheduler.enqueue(requests[4])
 
         for i in order:
             request = await scheduler.dequeue()
             assert request is requests[i]
-            scheduler.complete(request)
+            await scheduler.complete(request)
 
         assert [request.priority for request in requests] == [5, 5, 10, 1, 5]
         assert scheduler.is_empty
-        assert scheduler.snapshot()[0] == []
+        assert (await scheduler.snapshot())[0] == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("strategy, order", [("bfs", [1, 2, 4, 0, 3]), ("dfs", [4, 2, 1, 3, 0])])
@@ -55,24 +55,24 @@ class TestSchedulerOrder:
         for request in requests[:4]:
             await scheduler.enqueue(request)
         unfinished = await scheduler.dequeue()
-        pending, seen = scheduler.snapshot()
+        pending, seen = await scheduler.snapshot()
         assert unfinished in pending
         data = pickle.loads(pickle.dumps(CheckpointData(requests=pending, seen=seen)))
         saved_urls = [request.url for request in data.requests]
         restored = Scheduler(crawl_strategy=strategy)
-        restored.restore(data)
+        await restored.restore(data)
         assert [request.url for request in data.requests] == saved_urls
-        assert [request.url for request in restored.snapshot()[0]] == saved_urls
+        assert [request.url for request in (await restored.snapshot())[0]] == saved_urls
         assert not await restored.enqueue(Request(requests[0].url))
         await restored.enqueue(requests[4])
 
         for i in order:
             request = await restored.dequeue()
             assert request.url == requests[i].url
-            restored.complete(request)
+            await restored.complete(request)
 
         assert restored.is_empty
-        assert restored.snapshot()[0] == []
+        assert (await restored.snapshot())[0] == []
 
 
 class TestSchedulerEnqueue:
@@ -228,7 +228,7 @@ class TestSchedulerSnapshot:
         """Test snapshot of empty scheduler."""
         scheduler = Scheduler()
 
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
 
         assert requests == []
         assert seen == set()
@@ -242,7 +242,7 @@ class TestSchedulerSnapshot:
         await scheduler.enqueue(Request("https://example.com/2", priority=10))
         await scheduler.enqueue(Request("https://example.com/3", priority=1))
 
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
 
         assert len(requests) == 3
         # Should be sorted by priority (highest first due to negative priority in queue)
@@ -258,7 +258,7 @@ class TestSchedulerSnapshot:
         await scheduler.enqueue(Request("https://example.com/1"))
         await scheduler.enqueue(Request("https://example.com/2"))
 
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
 
         assert len(seen) == 2
         # Fingerprints are now bytes (SHA1 hashes)
@@ -273,13 +273,13 @@ class TestSchedulerSnapshot:
 
         await scheduler.enqueue(Request("https://example.com"))
 
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
 
         # Modifying snapshot shouldn't affect scheduler
         requests.append(Request("https://modified.com"))
         seen.add(b"new_fingerprint_bytes")
 
-        original_requests, original_seen = scheduler.snapshot()
+        original_requests, original_seen = await scheduler.snapshot()
 
         assert len(original_requests) == 1
         assert b"new_fingerprint_bytes" not in original_seen
@@ -295,14 +295,14 @@ class TestSchedulerSnapshot:
 
         in_flight = await scheduler.dequeue()
 
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
 
         assert len(requests) == 3
         assert in_flight.url in {r.url for r in requests}
         assert len(seen) == 3
 
-        scheduler.complete(in_flight)
-        requests, seen = scheduler.snapshot()
+        await scheduler.complete(in_flight)
+        requests, seen = await scheduler.snapshot()
         assert len(requests) == 2
         assert in_flight.url not in {r.url for r in requests}
         assert len(seen) == 3
@@ -324,7 +324,7 @@ class TestSchedulerRestore:
 
         data = CheckpointData(requests=checkpoint_requests, seen=checkpoint_seen)
 
-        scheduler.restore(data)
+        await scheduler.restore(data)
 
         assert len(scheduler) == 2
 
@@ -338,10 +338,10 @@ class TestSchedulerRestore:
             seen={b"fp1_bytes_here_pad", b"fp2_bytes_here_pad"},  # Bytes fingerprints
         )
 
-        scheduler.restore(data)
+        await scheduler.restore(data)
 
         # Verify seen set was restored
-        _, seen = scheduler.snapshot()
+        _, seen = await scheduler.snapshot()
         assert seen == {b"fp1_bytes_here_pad", b"fp2_bytes_here_pad"}
 
     @pytest.mark.asyncio
@@ -356,7 +356,7 @@ class TestSchedulerRestore:
         ]
 
         data = CheckpointData(requests=checkpoint_requests, seen=set())
-        scheduler.restore(data)
+        await scheduler.restore(data)
 
         # Dequeue should return high priority first
         first = await scheduler.dequeue()
@@ -371,7 +371,7 @@ class TestSchedulerRestore:
         scheduler = Scheduler()
 
         data = CheckpointData(requests=[], seen=set())
-        scheduler.restore(data)
+        await scheduler.restore(data)
 
         assert len(scheduler) == 0
         assert scheduler.is_empty is True
@@ -391,12 +391,12 @@ class TestSchedulerIntegration:
         await original.enqueue(Request("https://example.com/3", sid="s2", priority=7))
 
         # Snapshot
-        requests, seen = original.snapshot()
+        requests, seen = await original.snapshot()
         data = CheckpointData(requests=requests, seen=seen)
 
         # Restore to new scheduler
         restored = Scheduler()
-        restored.restore(data)
+        await restored.restore(data)
 
         # Verify state matches
         assert len(restored) == len(original)
@@ -418,11 +418,11 @@ class TestSchedulerIntegration:
             await scheduler.enqueue(Request(f"https://example.com/{i}"))
 
         # Process 2
-        scheduler.complete(await scheduler.dequeue())
-        scheduler.complete(await scheduler.dequeue())
+        await scheduler.complete(await scheduler.dequeue())
+        await scheduler.complete(await scheduler.dequeue())
 
         # Snapshot should show 3 pending, 5 seen
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
 
         assert len(requests) == 3
         assert len(seen) == 5
@@ -434,12 +434,12 @@ class TestSchedulerIntegration:
 
         await scheduler.enqueue(Request("https://example.com", sid="s1"))
 
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
         data = CheckpointData(requests=requests, seen=seen)
 
         # Restore to new scheduler
         new_scheduler = Scheduler()
-        new_scheduler.restore(data)
+        await new_scheduler.restore(data)
 
         # Try to add duplicate - should be filtered
         result = await new_scheduler.enqueue(Request("https://example.com", sid="s1"))
@@ -460,7 +460,7 @@ class TestSchedulerInFlight:
 
         request = await scheduler.dequeue()
 
-        requests, _ = scheduler.snapshot()
+        requests, _ = await scheduler.snapshot()
         assert len(requests) == 2
         assert request.url in {r.url for r in requests}
 
@@ -472,13 +472,13 @@ class TestSchedulerInFlight:
         await scheduler.enqueue(Request("https://example.com/1"))
         request = await scheduler.dequeue()
 
-        scheduler.complete(request)
-        requests, _ = scheduler.snapshot()
+        await scheduler.complete(request)
+        requests, _ = await scheduler.snapshot()
         assert requests == []
 
-        scheduler.complete(request)
-        scheduler.complete(Request("https://example.com/unknown"))
-        requests, _ = scheduler.snapshot()
+        await scheduler.complete(request)
+        await scheduler.complete(Request("https://example.com/unknown"))
+        requests, _ = await scheduler.snapshot()
         assert requests == []
 
     @pytest.mark.asyncio
@@ -492,15 +492,15 @@ class TestSchedulerInFlight:
         await scheduler.enqueue(request)
 
         assert len(scheduler) == 2
-        requests, _ = scheduler.snapshot()
+        requests, _ = await scheduler.snapshot()
         assert len(requests) == 2
 
-        scheduler.complete(await scheduler.dequeue())
-        requests, _ = scheduler.snapshot()
+        await scheduler.complete(await scheduler.dequeue())
+        requests, _ = await scheduler.snapshot()
         assert len(requests) == 1
 
-        scheduler.complete(await scheduler.dequeue())
-        assert scheduler.snapshot()[0] == []
+        await scheduler.complete(await scheduler.dequeue())
+        assert (await scheduler.snapshot())[0] == []
 
     @pytest.mark.asyncio
     async def test_in_flight_request_survives_checkpoint_resume(self):
@@ -513,11 +513,11 @@ class TestSchedulerInFlight:
         a = await scheduler.dequeue()
         assert a.url == "https://example.com/A"
 
-        requests, seen = scheduler.snapshot()
+        requests, seen = await scheduler.snapshot()
         data = CheckpointData(requests=requests, seen=seen)
 
         restored = Scheduler()
-        restored.restore(data)
+        await restored.restore(data)
 
         fetchable = set()
         while not restored.is_empty:

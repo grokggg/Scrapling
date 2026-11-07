@@ -1,5 +1,7 @@
 """Scheduler is a shell now: it must forward and add nothing."""
 
+import inspect
+
 import pytest
 
 from scrapling.spiders.checkpoint import CheckpointData
@@ -35,10 +37,10 @@ async def test_complete_forwards():
     await scheduler.enqueue(Request("https://example.com/a"))
     request = await scheduler.dequeue()
 
-    scheduler.complete(request)
+    await scheduler.complete(request)
 
     assert scheduler._backend._inflight == {}
-    assert scheduler.snapshot()[0] == []
+    assert (await scheduler.snapshot())[0] == []
 
 
 def test_is_empty_reads_the_backend():
@@ -54,17 +56,79 @@ async def test_snapshot_and_restore_forward():
     await scheduler.enqueue(Request("https://example.com/a", priority=3))
     await scheduler.enqueue(Request("https://example.com/b", priority=1))
 
-    pending, seen = scheduler.snapshot()
-    assert pending == scheduler._backend.snapshot()[0]
-    assert seen == scheduler._backend.snapshot()[1]
+    pending, seen = await scheduler.snapshot()
+    assert pending == (await scheduler._backend.snapshot())[0]
+    assert seen == (await scheduler._backend.snapshot())[1]
 
     restored = Scheduler()
-    restored.restore(CheckpointData(requests=pending, seen=seen))
+    await restored.restore(CheckpointData(requests=pending, seen=seen))
 
-    assert [request.url for request in restored.snapshot()[0]] == [request.url for request in pending]
+    assert [request.url for request in (await restored.snapshot())[0]] == [request.url for request in pending]
 
 
 def test_len_reads_the_backend():
     scheduler = Scheduler()
 
     assert len(scheduler) == len(scheduler._backend) == 0
+
+
+class RecordingBackend:
+    """Records every call, and never touches the in-memory implementation."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def enqueue(self, request):
+        self.calls.append(("enqueue", request.url))
+        return True
+
+    async def dequeue(self):
+        self.calls.append(("dequeue", None))
+        return Request("https://example.com/from-backend")
+
+    async def complete(self, request):
+        self.calls.append(("complete", request.url))
+
+    @property
+    def is_empty(self):
+        return True
+
+    async def snapshot(self):
+        self.calls.append(("snapshot", None))
+        return ([], set())
+
+    async def restore(self, data):
+        self.calls.append(("restore", data))
+
+
+@pytest.mark.asyncio
+async def test_every_method_reaches_an_injected_backend():
+    backend = RecordingBackend()
+    scheduler = Scheduler(backend=backend)
+    request = Request("https://example.com/a")
+
+    await scheduler.enqueue(request)
+    await scheduler.dequeue()
+    await scheduler.complete(request)
+    await scheduler.snapshot()
+    await scheduler.restore("sentinel")
+
+    assert backend.calls == [
+        ("enqueue", "https://example.com/a"),
+        ("dequeue", None),
+        ("complete", "https://example.com/a"),
+        ("snapshot", None),
+        ("restore", "sentinel"),
+    ]
+    assert not isinstance(scheduler._backend, MemoryQueue), "an injected backend replaces the default"
+
+
+@pytest.mark.asyncio
+async def test_complete_is_a_coroutine_and_hits_the_backend_once():
+    backend = RecordingBackend()
+    scheduler = Scheduler(backend=backend)
+
+    assert inspect.iscoroutinefunction(Scheduler.complete)
+    await scheduler.complete(Request("https://example.com/a"))
+
+    assert backend.calls == [("complete", "https://example.com/a")]

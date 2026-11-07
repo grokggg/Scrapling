@@ -1,5 +1,7 @@
 """Queue contract: dedup, priority, in-flight bookkeeping keyed by fingerprint."""
 
+import inspect
+
 import pytest
 
 from scrapling.spiders.checkpoint import CheckpointData
@@ -53,7 +55,7 @@ async def test_inflight_is_tracked_under_the_fingerprint():
     assert list(queue._inflight) == [fingerprint]
     # in-flight work is not "pending to hand out", but it is still in the checkpoint
     assert queue.is_empty is True
-    assert queue.snapshot()[0] == [request]
+    assert (await queue.snapshot())[0] == [request]
 
 
 @pytest.mark.asyncio
@@ -62,10 +64,10 @@ async def test_complete_clears_the_inflight_slot():
     await queue.enqueue(_request("https://example.com/a"))
     request = await queue.dequeue()
 
-    queue.complete(request)
+    await queue.complete(request)
 
     assert queue._inflight == {}
-    assert queue.snapshot()[0] == []
+    assert (await queue.snapshot())[0] == []
 
 
 @pytest.mark.asyncio
@@ -97,12 +99,12 @@ async def test_snapshot_restore_round_trip():
     for index, url in enumerate(urls):
         await queue.enqueue(_request(url, priority=index))
 
-    pending, seen = queue.snapshot()
+    pending, seen = await queue.snapshot()
     restored = MemoryQueue()
-    restored.restore(CheckpointData(requests=pending, seen=seen))
+    await restored.restore(CheckpointData(requests=pending, seen=seen))
 
-    assert [request.url for request in restored.snapshot()[0]] == [request.url for request in pending]
-    assert restored.snapshot()[1] == seen
+    assert [request.url for request in (await restored.snapshot())[0]] == [request.url for request in pending]
+    assert (await restored.snapshot())[1] == seen
     assert await restored.enqueue(_request(urls[0])) is False, "seen set survives the round trip"
 
 
@@ -114,10 +116,10 @@ async def test_complete_works_with_a_different_object_of_the_same_url():
     await queue.dequeue()
 
     stranger = _request("https://example.com/a")
-    queue.complete(stranger)
+    await queue.complete(stranger)
 
     assert queue._inflight == {}
-    assert queue.snapshot()[0] == []
+    assert (await queue.snapshot())[0] == []
 
 
 @pytest.mark.asyncio
@@ -135,3 +137,28 @@ async def test_memory_queue_satisfies_the_protocol_and_matches_the_shell():
     assert (await queue.dequeue()).url == (await shell.dequeue()).url == "https://example.com/y"
     assert (await queue.dequeue()).url == (await shell.dequeue()).url == "https://example.com/x"
     assert queue.is_empty is shell.is_empty is True
+
+
+def test_async_methods_are_coroutine_functions():
+    """The contract is async end to end, so a networked backend can await inside it."""
+    for name in ("enqueue", "dequeue", "complete", "snapshot", "restore"):
+        assert inspect.iscoroutinefunction(getattr(MemoryQueue, name)), name
+
+
+@pytest.mark.asyncio
+async def test_awaited_lifecycle_matches_the_synchronous_semantics():
+    queue = MemoryQueue()
+    await queue.enqueue(_request("https://example.com/a"))
+    request = await queue.dequeue()
+
+    await queue.complete(request)
+    assert queue._inflight == {}
+
+    await queue.enqueue(_request("https://example.com/b"))
+    pending, seen = await queue.snapshot()
+    assert [r.url for r in pending] == ["https://example.com/b"]
+    assert len(seen) == 2
+
+    restored = MemoryQueue()
+    await restored.restore(CheckpointData(requests=pending, seen=seen))
+    assert [r.url for r in (await restored.snapshot())[0]] == ["https://example.com/b"]

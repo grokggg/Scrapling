@@ -50,6 +50,7 @@ class CrawlerEngine:
         self.spider = spider
         self.session_manager = session_manager
         self.scheduler = Scheduler(
+            backend=getattr(spider, "queue_backend", None),
             include_kwargs=spider.fp_include_kwargs,
             include_headers=spider.fp_include_headers,
             keep_fragments=spider.fp_keep_fragments,
@@ -692,7 +693,7 @@ class CrawlerEngine:
         try:
             await self._process_request(request)
         finally:
-            self.scheduler.complete(request)
+            await self.scheduler.complete(request)
             self._active_tasks -= 1
 
     def request_pause(self) -> None:
@@ -716,7 +717,7 @@ class CrawlerEngine:
 
     async def _save_checkpoint(self) -> None:
         """Save current state to checkpoint files."""
-        requests, seen = self.scheduler.snapshot()
+        requests, seen = await self.scheduler.snapshot()
         data = CheckpointData(requests=requests, seen=seen)
         await self._checkpoint_manager.save(data)
         self._last_checkpoint_time = anyio.current_time()
@@ -744,7 +745,7 @@ class CrawlerEngine:
         if data is None:
             return False
 
-        self.scheduler.restore(data)
+        await self.scheduler.restore(data)
 
         # Restore callbacks from spider after scheduler restore
         for request in data.requests:

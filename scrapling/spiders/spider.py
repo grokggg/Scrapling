@@ -107,6 +107,8 @@ class Spider(ABC):
 
     #: 结果存储。None = 内存 ItemList（旧行为）；给一个 store 则按 URL upsert。
     store: Optional["Store"] = None
+    #: 任务队列后端。None = MemoryQueue（进程内）；给一个 Queue 则由它接管调度。
+    queue_backend: Optional["Queue"] = None
     #: 内容去重记忆窗口，超过就从最早的开始淘汰（store 索引仍兜底）。
     dedup_window: int = 10000
     #: 默认关闭，显式打开才做内容去重。
