@@ -110,3 +110,11 @@ output/*/index.html
 docs/_build
 public/
 web/
+
+# scrapling-ops runtime artefacts
+crawl.db
+crawl.db-wal
+crawl.db-shm
+items.jsonl
+audit.jsonl
+metrics.txt
