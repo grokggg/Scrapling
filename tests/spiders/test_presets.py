@@ -210,3 +210,32 @@ class TestPacingPresets:
         from scrapling.spiders.spider import Spider
 
         assert Spider.pacing_config is None
+
+
+class TestAptBrowserPool:
+    def test_apt_spider_opens_a_sixteen_tab_render_pool(self):
+        from scrapling.spiders.presets import make_apt_spider
+        from scrapling.spiders.spider import Spider
+
+        class Probe(make_apt_spider(Spider)):
+            name = "apt_probe"
+
+            async def parse(self, response):
+                yield None
+
+        spider = Probe()
+
+        assert spider.browser_max_pages == 16
+        assert spider.browser_disable_resources is True
+        assert spider.browser_block_ads is True
+        assert spider.browser_retries == 2
+        assert spider.browser_retry_delay == 0.5
+
+    def test_plain_spiders_keep_the_upstream_browser_defaults(self):
+        from scrapling.spiders.spider import Spider
+
+        assert Spider.browser_max_pages == 1
+        assert Spider.browser_disable_resources is False
+        assert Spider.browser_block_ads is False
+        assert Spider.browser_retries == 3
+        assert Spider.browser_retry_delay == 1.0

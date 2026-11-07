@@ -101,6 +101,13 @@ def make_apt_spider(base_class):
         # 节奏：0.3s 基准 + 20 次一顿 + 500 次换 session
         pacing_config = APT_PACING
 
+        # BROWSER 档渲染池：16 个并发 tab
+        browser_max_pages = 16
+        browser_disable_resources = True  # 速度优先，去图/字体/媒体（P7 第二批会分档）
+        browser_block_ads = True  # 3526 个广告/追踪域名
+        browser_retries = 2  # 比默认 3 少，因为失败时 P7 第三批会降级
+        browser_retry_delay = 0.5
+
         # 代理池按需注入（proxy_pool 仍为 None），但池策略更激进
         proxy_pool_config = ProxyPoolConfig(
             health_check_interval=30.0,  # 比默认 60s 短一半

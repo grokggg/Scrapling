@@ -338,3 +338,65 @@ class TestFingerprintBinding:
             "firefox133",
             "edge131",
         ]
+
+
+class TestBrowserRenderPool:
+    def test_browser_session_takes_max_pages_from_the_spider(self):
+        from scrapling.spiders.adaptive import FetchLevel
+        from scrapling.spiders.session import SessionManager
+        from scrapling.spiders.spider import Spider
+
+        class Wide(Spider):
+            name = "wide"
+            start_urls = ["https://example.com/"]
+            browser_max_pages = 16
+
+            async def parse(self, response):
+                yield None
+
+        spider = Wide()
+        manager = spider._session_manager
+        assert manager._spider is spider
+
+        sid = manager.ensure_domain_session("example.com", FetchLevel.BROWSER)
+
+        assert sid == "browser:4:example.com"
+        assert manager.get(sid).max_pages == 16
+
+    def test_browser_session_defaults_to_one_page(self):
+        from scrapling.spiders.adaptive import FetchLevel
+        from scrapling.spiders.spider import Spider
+
+        class Plain(Spider):
+            name = "plain"
+            start_urls = ["https://example.com/"]
+
+            async def parse(self, response):
+                yield None
+
+        spider = Plain()
+        sid = spider._session_manager.ensure_domain_session("example.com", FetchLevel.BROWSER)
+
+        assert spider._session_manager.get(sid).max_pages == 1
+
+    def test_a_manager_built_by_hand_adopts_the_engine_spider(self):
+        from scrapling.spiders.engine import CrawlerEngine
+        from scrapling.spiders.session import SessionManager
+        from scrapling.spiders.spider import Spider
+
+        class Wide(Spider):
+            name = "wide2"
+            start_urls = ["https://example.com/"]
+            browser_max_pages = 8
+
+            async def parse(self, response):
+                yield None
+
+        spider = Wide()
+        hand_made = SessionManager()
+        hand_made.add("main", spider._session_manager.get(spider._session_manager.session_ids[0]), default=True)
+        assert hand_made._spider is None
+
+        CrawlerEngine(spider, hand_made)
+
+        assert hand_made._spider is spider

@@ -29,6 +29,7 @@ def _build_session(
     fingerprint_pool: "FingerprintPool | None" = None,
     domain: str = "",
     salt: int = 0,
+    spider_config: "object | None" = None,
 ) -> Session:
     """Create the session that `level` maps to. Never started here — registration is lazy.
 
@@ -37,7 +38,19 @@ def _build_session(
     pin a whole browser profile so the handshake and the headers cannot disagree.
     """
     if level == FetchLevel.BROWSER:
-        return AsyncStealthySession(headless=True, real_chrome=False, hide_canvas=True, allow_webgl=True)
+        # Browser knobs are owned by the spider (it knows whether it wants 1 tab or 16), and
+        # read through getattr so a spider that never heard of them keeps the upstream defaults.
+        return AsyncStealthySession(
+            max_pages=getattr(spider_config, "browser_max_pages", 1),
+            disable_resources=getattr(spider_config, "browser_disable_resources", False),
+            block_ads=getattr(spider_config, "browser_block_ads", False),
+            retries=getattr(spider_config, "browser_retries", 3),
+            retry_delay=getattr(spider_config, "browser_retry_delay", 1),
+            headless=True,
+            real_chrome=False,
+            hide_canvas=True,
+            allow_webgl=True,
+        )
     if level == FetchLevel.DIRECT:
         return FetcherSession(impersonate="chrome", stealthy_headers=False)
     if level == FetchLevel.HEADERS:
@@ -64,8 +77,10 @@ def session_sid(domain: str, level: FetchLevel) -> str:
 class SessionManager:
     """Manages pre-configured session instances."""
 
-    def __init__(self, fingerprint_pool: "FingerprintPool | None" = None) -> None:
+    def __init__(self, spider: "object | None" = None, *, fingerprint_pool: "FingerprintPool | None" = None) -> None:
         self._sessions: dict[str, Session] = {}
+        # The owning spider, used only to read browser-rung knobs (`browser_max_pages` …).
+        self._spider = spider
         self._default_session_id: str | None = None
         self._started: bool = False
         self._lazy_sessions: Set[str] = set()
@@ -128,7 +143,11 @@ class SessionManager:
             if sid not in self._sessions:
                 salt = self._fingerprint_rotation.get(domain or NO_DOMAIN, 0)
                 previous_default = self._default_session_id
-                self.add(sid, _build_session(level, self._fingerprint_pool, domain, salt), lazy=True)
+                self.add(
+                    sid,
+                    _build_session(level, self._fingerprint_pool, domain, salt, self._spider),
+                    lazy=True,
+                )
                 # A lazily ensured session must never steal the default slot: `reset_domain`
                 # spares the default, so hijacking it would leave a burnt session alive.
                 if previous_default is None:

@@ -68,6 +68,10 @@ class CrawlerEngine:
         self._pacing: Optional[PacingController] = (
             PacingController(pacing_config) if pacing_config is not None else None
         )
+        # A manager built by hand (`SessionManager()`) has no spider; adopt ours so the
+        # BROWSER rung still reads this spider's tab count instead of the defaults.
+        if getattr(self.session_manager, "_spider", None) is None:
+            self.session_manager._spider = self.spider
 
         if self.spider.robots_txt_obey:
 

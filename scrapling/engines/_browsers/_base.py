@@ -1,6 +1,6 @@
 from time import time
 from pathlib import Path
-from asyncio import sleep as asyncio_sleep, Lock
+from asyncio import sleep as asyncio_sleep, Semaphore, wait_for, TimeoutError as AsyncTimeoutError
 from contextlib import contextmanager, asynccontextmanager, suppress
 
 from patchright.sync_api import Page
@@ -270,7 +270,9 @@ class AsyncSession:
         self.browser: Any = None
         self._is_alive = False
         self._owns_context = True
-        self._lock = Lock()
+        # One slot per page: N concurrent tabs may be acquired at once. The pool itself is
+        # guarded by its own RLock, this only bounds how many callers may be inside _get_page.
+        self._page_sem = Semaphore(max_pages)
 
     async def start(self) -> None:
         pass
@@ -356,7 +358,17 @@ class AsyncSession:
         if TYPE_CHECKING:
             assert ctx is not None, "Browser context not initialized"
 
-        async with self._lock:
+        # Acquire a slot first: with max_pages slots the pool can hand out that many tabs at
+        # once, where the old single session lock serialised every caller. The wait is bounded
+        # because queueing forever would turn a dead tab into a dead crawler.
+        try:
+            await wait_for(self._page_sem.acquire(), timeout=self._max_wait_for_page)
+        except AsyncTimeoutError:
+            raise TimeoutError(
+                f"No page slot became free within the {self._max_wait_for_page}s timeout period"
+            ) from None
+
+        try:
             page_info = self.page_pool.get_ready_page() if context is None else None
             if page_info is None and context is None and self.page_pool.pages_count >= self.max_pages:
                 # At max capacity with the persistent context, so wait for a busy page to become ready
@@ -368,7 +380,7 @@ class AsyncSession:
                         break
                 else:
                     raise TimeoutError(
-                        f"No pages finished to clear place in the pool within the {self._max_wait_for_page}s timeout period"
+                        f"No page finished to clear a slot within the {self._max_wait_for_page}s timeout period"
                     )
 
             if page_info is None:
@@ -382,6 +394,11 @@ class AsyncSession:
             if disable_resources or blocked_domains:
                 await page.route("**/*", create_async_intercept_handler(disable_resources, blocked_domains))
             return cast(PageInfo[AsyncPage], page_info)
+        except BaseException:
+            # Handed back only on failure; on success the slot travels with the page and is
+            # released by `_page_generator` once the page returns to the pool.
+            self._page_sem.release()
+            raise
 
     def get_pool_stats(self) -> Dict[str, int]:
         """Get statistics about the current page pool"""
@@ -472,6 +489,10 @@ class AsyncSession:
                     self.page_pool.remove_page(page_info)
                 self.network._detach(context)
                 await context.close()
+                # Only a page that was actually handed out holds a slot; `_get_page` already
+                # returned it if it failed before yielding.
+                if page_info is not None:
+                    self._page_sem.release()
         else:
             # Standard mode: use PagePool with persistent context
             page_info = await self._get_page(timeout, extra_headers, disable_resources, blocked_domains)
@@ -484,6 +505,8 @@ class AsyncSession:
                     self.page_pool.remove_page(page_info)
                 else:
                     page_info.mark_ready()
+                # The tab is reusable again (or gone), so the slot goes back to the pool.
+                self._page_sem.release()
 
 
 class BaseSessionMixin:

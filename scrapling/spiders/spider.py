@@ -101,6 +101,14 @@ class Spider(ABC):
     # Request rhythm. None = pacing off (zero overhead); set a PacingConfig to opt in.
     pacing_config: Optional["PacingConfig"] = None
 
+    # BROWSER rung knobs. Defaults mirror the upstream validator defaults, so a spider that
+    # sets none of them behaves exactly as before.
+    browser_max_pages: int = 1
+    browser_disable_resources: bool = False
+    browser_block_ads: bool = False
+    browser_retries: int = 3
+    browser_retry_delay: float = 1.0
+
     start_urls: list[str] = []
     allowed_domains: Set[str] = set()
 
@@ -179,7 +187,7 @@ class Spider(ABC):
         self._engine: Optional[CrawlerEngine] = None
         self._original_sigint_handler: Any = None
 
-        self._session_manager = SessionManager()
+        self._session_manager = SessionManager(self)
 
         try:
             self.configure_sessions(self._session_manager)
