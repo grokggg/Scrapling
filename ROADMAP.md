@@ -19,7 +19,7 @@
 - [x] P5 fingerprint profiles
 - [x] P6 pacing
 - [x] P7 render pool
-- [ ] P8 incremental
-- [ ] P9 storage
+- [x] P8 incremental
+- [x] P9 storage
 - [ ] P10 telemetry
 - [ ] P11 distributed

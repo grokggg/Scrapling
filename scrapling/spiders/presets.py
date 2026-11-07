@@ -14,6 +14,7 @@ from scrapling.spiders.adaptive import AdaptiveConfig
 from scrapling.spiders.incremental import IncrementalCache
 from scrapling.spiders.incremental_storage import MemoryStorage
 from scrapling.spiders.pacing import PacingConfig
+from scrapling.spiders.stores.sqlite import SQLiteStore
 
 __all__ = [
     "APT_INCREMENTAL",
@@ -120,6 +121,14 @@ def make_apt_spider(base_class):
         browser_fallback_to_static = True  # 渲染失败当场降档 TLS，BROWSER 挂不再等于 URL 丢
 
         incremental_cache = APT_INCREMENTAL  # 1h TTL，激进增量
+
+        # 存储默认不实例化（store 仍为 None，用户可注入自己的）。要给就用工厂：
+        # 每次调用一个独立连接，绝不跨 run 共享句柄。
+        apt_store_path = "./apt_store.db"
+
+        @classmethod
+        def apt_store_factory(cls) -> SQLiteStore:
+            return SQLiteStore(cls.apt_store_path)
 
         # 代理池按需注入（proxy_pool 仍为 None），但池策略更激进
         proxy_pool_config = ProxyPoolConfig(

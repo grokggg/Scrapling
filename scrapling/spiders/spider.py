@@ -27,6 +27,7 @@ BLOCKED_CODES = {401, 403, 407, 444}
 if TYPE_CHECKING:
     from scrapling.spiders.adaptive import AdaptiveConfig
     from scrapling.spiders.incremental import IncrementalCache
+    from scrapling.spiders.store import Store
     from scrapling.engines.toolbelt.custom import Response
 
 
@@ -103,6 +104,13 @@ class Spider(ABC):
     pacing_config: Optional["PacingConfig"] = None
     #: 增量抓取。None = 每次都重新下载；给一个 cache 则按 ETag/Last-Modified 做条件请求。
     incremental_cache: Optional["IncrementalCache"] = None
+
+    #: 结果存储。None = 内存 ItemList（旧行为）；给一个 store 则按 URL upsert。
+    store: Optional["Store"] = None
+    #: 内容去重记忆窗口，超过就从最早的开始淘汰（store 索引仍兜底）。
+    dedup_window: int = 10000
+    #: 默认关闭，显式打开才做内容去重。
+    dedup_enabled: bool = False
 
     # BROWSER rung knobs. Defaults mirror the upstream validator defaults, so a spider that
     # sets none of them behaves exactly as before.

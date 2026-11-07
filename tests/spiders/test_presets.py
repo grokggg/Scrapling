@@ -294,3 +294,40 @@ class TestIncrementalPresets:
         assert APT_INCREMENTAL._ttl == 3600
         assert ENGINEERING_INCREMENTAL._ttl == 86400
         assert Spider.incremental_cache is None
+
+
+class TestAptStore:
+    def test_the_factory_hands_out_sqlite_stores(self, tmp_path):
+        from scrapling.spiders.presets import make_apt_spider
+        from scrapling.spiders.spider import Spider
+        from scrapling.spiders.stores import SQLiteStore
+
+        class Probe(make_apt_spider(Spider)):
+            name = "apt_store_probe"
+            apt_store_path = str(tmp_path / "apt.db")
+
+            async def parse(self, response):
+                yield None
+
+        first = Probe.apt_store_factory()
+        second = Probe.apt_store_factory()
+        try:
+            assert isinstance(first, SQLiteStore)
+            assert isinstance(second, SQLiteStore)
+            assert first is not second, "each call opens its own handle"
+            assert Probe.store is None, "the spider itself stays opt-in"
+        finally:
+            first.close()
+            second.close()
+
+    def test_the_default_path_is_a_real_file_location(self):
+        from scrapling.spiders.presets import make_apt_spider
+        from scrapling.spiders.spider import Spider
+
+        class Probe(make_apt_spider(Spider)):
+            name = "apt_store_default_probe"
+
+            async def parse(self, response):
+                yield None
+
+        assert Probe.apt_store_path == "./apt_store.db"
