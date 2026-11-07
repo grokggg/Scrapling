@@ -2,18 +2,24 @@ import signal
 import logging
 from pathlib import Path
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 
 import anyio
 from anyio import Path as AsyncPath
 
 from scrapling.spiders.request import Request
+from scrapling.spiders.retry import RetryPolicy
 from scrapling.spiders.engine import CrawlerEngine
 from scrapling.spiders.session import SessionManager
 from scrapling.core.utils import set_logger, reset_logger
 from scrapling.spiders.result import CrawlResult, CrawlStats
 from scrapling.core._types import Set, Any, Dict, Optional, Union, TYPE_CHECKING, AsyncGenerator
 
-BLOCKED_CODES = {401, 403, 407, 429, 444, 500, 502, 503, 504}
+# Hard blocks only: 401/403/407/444 mean the identity itself is not welcome, so they
+# keep their dedicated retry path (proxy stripping + max_blocked_retries). 429 and 5xx
+# are transient — they belong to RetryPolicy in scrapling/spiders/retry.py, so that
+# retry strength is decided by exactly one policy table.
+BLOCKED_CODES = {401, 403, 407, 444}
 if TYPE_CHECKING:
     from scrapling.engines.toolbelt.custom import Response
 
@@ -69,6 +75,13 @@ class Spider(ABC):
     """
 
     name: Optional[str] = None
+
+    # Retry policy for transient failures (status codes + exceptions).
+    # None means "use RetryPolicy() defaults". Overrides are keyed by host suffix;
+    # first match in declaration order wins, so declare the most specific domain first.
+    retry_policy: Optional[RetryPolicy] = None
+    retry_policy_overrides: dict[str, RetryPolicy] = {}
+
     start_urls: list[str] = []
     allowed_domains: Set[str] = set()
 
@@ -138,6 +151,12 @@ class Spider(ABC):
 
         self.crawldir: Optional[Path] = Path(crawldir) if crawldir else None
         self._interval = interval
+        # Copy-on-init: `retry_policy_overrides` is a plain class attribute, shared by
+        # every instance (and every subclass that does not redeclare it) — the same
+        # footgun upstream already has with start_urls/allowed_domains. One dict per
+        # instance, seeded from the class attribute, keeps the class-level declaration
+        # as the default while making runtime edits instance-local.
+        self.retry_policy_overrides = dict(type(self).retry_policy_overrides)
         self._engine: Optional[CrawlerEngine] = None
         self._original_sigint_handler: Any = None
 
@@ -202,6 +221,8 @@ class Spider(ABC):
         """A hook to be overridden by users to do some processing on scraped items, return `None` to drop the item silently."""
         return item
 
+    # 401/403/407/444 are hard blocks — handled by the blocked-retry path.
+    # 429 and 5xx are transient — handled by RetryPolicy in retry.py.
     async def is_blocked(self, response: "Response") -> bool:
         """Check if the response is blocked. Users should override this for custom detection logic."""
         if response.status in BLOCKED_CODES:
@@ -211,6 +232,28 @@ class Spider(ABC):
     async def retry_blocked_request(self, request: Request, response: "Response") -> Request:
         """Users should override this to prepare the blocked request before retrying, if needed."""
         return request
+
+    def get_retry_policy(self, request: Request) -> RetryPolicy:
+        """Return the retry policy that governs `request`.
+
+        Host suffix match against `retry_policy_overrides` (so `sub.example.com` is
+        covered by an `example.com` entry), first match in declaration order wins.
+        Falls back to `retry_policy`, then to `RetryPolicy()` defaults.
+        """
+        host = urlparse(request.url).hostname or ""
+        for domain, policy in self.retry_policy_overrides.items():
+            if host == domain or host.endswith("." + domain):
+                return policy
+        return self.retry_policy or RetryPolicy()
+
+    def _bump_retry(self, request: Request) -> None:
+        """Increment the request's attempt counter, in place.
+
+        `_retry_count` is the field `Request` actually defines (it is what `copy()`
+        and checkpoint pickling carry); writing a public `retry_count` instead would
+        be dropped on the next copy and turn a bounded retry into an infinite one.
+        """
+        request._retry_count = getattr(request, "_retry_count", 0) + 1
 
     def __repr__(self) -> str:
         """String representation of the spider."""

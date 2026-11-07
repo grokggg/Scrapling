@@ -5,6 +5,7 @@ import pytest
 
 from scrapling.spiders.engine import CrawlerEngine
 from scrapling.spiders.request import Request
+from scrapling.spiders.retry import RetryPolicy
 from scrapling.spiders.session import SessionManager
 from scrapling.spiders.throttle import AutoThrottle, parse_retry_after
 from scrapling.engines.toolbelt.custom import Response
@@ -244,6 +245,9 @@ class MockSpider:
         self.concurrent_requests_per_domain = 1
         self.download_delay = 0.0
         self.max_blocked_retries = 0
+        # These tests are about pacing, not retries: cap the ladder at one extra
+        # attempt so a permanently-failing mock does not spend real backoff time.
+        self.retry_policy = RetryPolicy(max_attempts=1)
         self.autothrottle_enabled = enabled
         self.autothrottle_start_delay = start_delay
         self.autothrottle_max_delay = 1.0
@@ -279,6 +283,11 @@ class MockSpider:
 
     async def is_blocked(self, response) -> bool:
         return self._blocked
+
+    def get_retry_policy(self, request: Request) -> RetryPolicy:
+        # MockSpider is duck-typed, not a Spider subclass, so the real
+        # resolution logic is not inherited; hand the policy over directly.
+        return self.retry_policy
 
     async def retry_blocked_request(self, request: Request, response) -> Request:
         return request

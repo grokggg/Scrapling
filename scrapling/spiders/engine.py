@@ -14,6 +14,7 @@ from scrapling.spiders.request import Request, Response
 from scrapling.spiders.robotstxt import RobotsTxtManager
 from scrapling.spiders.result import CrawlStats, ItemList
 from scrapling.spiders.throttle import AutoThrottle, parse_retry_after
+from scrapling.spiders.retry import RetryDecision, RetryEngine, RetryPolicy, attempt_of, make_retry
 from scrapling.spiders.cache import ResponseCacheManager
 from scrapling.spiders.checkpoint import CheckpointManager, CheckpointData
 from scrapling.core._types import Dict, Union, Optional, TYPE_CHECKING, Any, AsyncGenerator
@@ -183,6 +184,38 @@ class CrawlerEngine:
             log.error(msg, exc_info=e)
             await self.spider.on_error(request, e)
 
+    def _get_policy(self, request: Request) -> RetryPolicy:
+        """Retry policy that governs `request`.
+
+        `getattr` on purpose: third-party spiders and test doubles predate this layer,
+        so a spider without `get_retry_policy` simply gets the default policy instead
+        of an AttributeError in the middle of a crawl.
+        """
+        getter = getattr(self.spider, "get_retry_policy", None)
+        if getter is None:
+            return RetryPolicy()
+        try:
+            return getter(request)
+        except Exception:
+            return RetryPolicy()
+
+    async def _schedule_retry(self, request: Request, decision: RetryDecision, delay: float) -> None:
+        """Wait out `delay`, then re-enqueue a retry copy of `request`."""
+        if delay > 0:
+            await anyio.sleep(delay)
+
+        retry = make_retry(request, decision)
+
+        bumper = getattr(self.spider, "_bump_retry", None)
+        if bumper is not None:
+            bumper(retry)
+        else:
+            retry._retry_count = getattr(retry, "_retry_count", 0) + 1
+
+        self._normalize_request(retry)
+        await self.scheduler.enqueue(retry)
+        log.info("Scheduled retry (%s, attempt %d): %s", decision.name, attempt_of(retry), request.url)
+
     async def _process_request(self, request: Request) -> None:
         """Download and process a single request."""
         if self._robots_manager:
@@ -211,6 +244,8 @@ class CrawlerEngine:
                 await self._run_callbacks(request, cached)
                 return
 
+        retry_plan = None
+
         async with self._rate_limiter(request.domain):
             if self._autothrottle:
                 delay = self._autothrottle.delay_for(request.domain, floor)
@@ -231,9 +266,23 @@ class CrawlerEngine:
                 self.stats.increment_status(response.status)
 
             except Exception as e:
-                self.stats.failed_requests_count += 1
-                await self.spider.on_error(request, e)
-                return
+                decision, delay = RetryEngine(self._get_policy(request)).decide(request, exc=e)
+                if decision is RetryDecision.GIVE_UP:
+                    log.warning(
+                        "retry give up: url=%s exc=%s attempt=%d",
+                        request.url,
+                        type(e).__name__,
+                        attempt_of(request),
+                    )
+                    self.stats.failed_requests_count += 1
+                    await self.spider.on_error(request, e)
+                    return
+                retry_plan = (decision, delay)
+
+        # Sleep outside the rate limiter: a backing-off worker must not hold a slot.
+        if retry_plan is not None:
+            await self._schedule_retry(request, *retry_plan)
+            return
 
         if self._cache_manager and request._fp is not None:
             self.stats.cache_misses += 1
@@ -263,6 +312,21 @@ class CrawlerEngine:
             else:
                 log.warning(f"Max retries exceeded for blocked request: {request.url}")
             return
+
+        # Transient failures (429 / 5xx): the one policy table decides what happens.
+        # Blocked responses returned above, so the two retry paths never stack.
+        policy = self._get_policy(request)
+        decision, delay = RetryEngine(policy).decide(request, response=response)
+        if decision is not RetryDecision.GIVE_UP:
+            await self._schedule_retry(request, decision, delay)
+            return
+        if response.status in policy.retry_on_status:
+            log.warning(
+                "retry exhausted: url=%s status=%d attempt=%d",
+                request.url,
+                response.status,
+                attempt_of(request),
+            )
 
         if self._cache_manager and request._fp is not None:
             await self._cache_manager.put(request._fp, response, request._session_kwargs.get("method", "GET"))

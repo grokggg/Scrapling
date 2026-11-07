@@ -152,16 +152,19 @@ class TestBlockedCodes:
     """Test BLOCKED_CODES constant."""
 
     def test_blocked_codes_contains_expected_values(self):
-        """Test that BLOCKED_CODES contains expected HTTP status codes."""
+        """Test that BLOCKED_CODES lists hard blocks only — transients moved to RetryPolicy."""
         assert 401 in BLOCKED_CODES  # Unauthorized
         assert 403 in BLOCKED_CODES  # Forbidden
         assert 407 in BLOCKED_CODES  # Proxy Authentication Required
-        assert 429 in BLOCKED_CODES  # Too Many Requests
         assert 444 in BLOCKED_CODES  # Connection Closed Without Response (nginx)
-        assert 500 in BLOCKED_CODES  # Internal Server Error
-        assert 502 in BLOCKED_CODES  # Bad Gateway
-        assert 503 in BLOCKED_CODES  # Service Unavailable
-        assert 504 in BLOCKED_CODES  # Gateway Timeout
+        # Transient failures are owned by RetryPolicy (scrapling/spiders/retry.py) so that
+        # retry strength is decided by exactly one table; they must not take the
+        # blocked-retry path (which strips the proxy and uses its own budget).
+        assert 429 not in BLOCKED_CODES  # Too Many Requests
+        assert 500 not in BLOCKED_CODES  # Internal Server Error
+        assert 502 not in BLOCKED_CODES  # Bad Gateway
+        assert 503 not in BLOCKED_CODES  # Service Unavailable
+        assert 504 not in BLOCKED_CODES  # Gateway Timeout
 
     def test_blocked_codes_does_not_contain_success(self):
         """Test that success codes are not blocked."""
@@ -416,10 +419,18 @@ class TestSpiderHooks:
 
         spider = ConcreteSpider()
 
-        # Test blocked codes
+        # Test blocked codes: hard blocks keep the blocked-retry path
+        assert await spider.is_blocked(MockResponse(401)) is True
         assert await spider.is_blocked(MockResponse(403)) is True
-        assert await spider.is_blocked(MockResponse(429)) is True
-        assert await spider.is_blocked(MockResponse(503)) is True
+        assert await spider.is_blocked(MockResponse(407)) is True
+        assert await spider.is_blocked(MockResponse(444)) is True
+
+        # Transient statuses belong to RetryPolicy, so they are not "blocked" anymore
+        assert await spider.is_blocked(MockResponse(429)) is False
+        assert await spider.is_blocked(MockResponse(500)) is False
+        assert await spider.is_blocked(MockResponse(502)) is False
+        assert await spider.is_blocked(MockResponse(503)) is False
+        assert await spider.is_blocked(MockResponse(504)) is False
 
         # Test non-blocked codes
         assert await spider.is_blocked(MockResponse(200)) is False
