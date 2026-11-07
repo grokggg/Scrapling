@@ -23,6 +23,8 @@ from scrapling.spiders.pacing import PacingController
 from scrapling.spiders.proxy_pool import ProxyPool, ProxyPoolConfig
 from scrapling.spiders.cache import ResponseCacheManager
 from scrapling.spiders.checkpoint import CheckpointManager, CheckpointData
+from scrapling.spiders.dedup import ContentDeduplicator
+from scrapling.spiders.store import StoredItem
 from scrapling.core._types import Dict, Union, Optional, TYPE_CHECKING, Any, AsyncGenerator
 
 if TYPE_CHECKING:
@@ -63,6 +65,15 @@ class CrawlerEngine:
         self.session_manager.fingerprint_pool = getattr(self.spider, "fingerprint_pool", FINGERPRINT_POOL)
         # Proxy pool is opt-in: without it the PROXY rung falls back to TLS.
         self._proxy_pool: Optional[ProxyPool] = getattr(self.spider, "proxy_pool", None)
+        # P9: persistence is opt-in, and so is dedup (dedup without a store has nothing to
+        # consult after its window rolls over).
+        store = getattr(self.spider, "store", None)
+        self._dedup: Optional[ContentDeduplicator] = (
+            ContentDeduplicator(store, window=getattr(self.spider, "dedup_window", 10000))
+            if store is not None and getattr(self.spider, "dedup_enabled", False)
+            else None
+        )
+
         # Pacing is opt-in: a spider that never asked for it pays nothing, not even a draw.
         pacing_config = getattr(self.spider, "pacing_config", None)
         self._pacing: Optional[PacingController] = (
@@ -510,7 +521,56 @@ class CrawlerEngine:
         if self._cache_manager and request._fp is not None:
             await self._cache_manager.put(request._fp, response, request._session_kwargs.get("method", "GET"))
 
+        await self._store_response(request, response)
+
         await self._run_callbacks(request, response)
+
+    async def _store_response(self, request: Request, response: Response) -> None:
+        """Hand the row to the spider's store. A store failure never kills the crawl."""
+        store = getattr(self.spider, "store", None)
+        if store is None or not 200 <= response.status < 300:
+            return
+        try:
+            item = self._extract_item(request, response)
+            if item is None:
+                return
+            # Hashes are left blank on purpose: StoredItem derives them the same way the
+            # store keys rows, so get(url) and the upsert agree.
+            stored = StoredItem(
+                url=request.url,
+                item=item,
+                source_sid=request.sid or "",
+                meta=dict(getattr(request, "meta", None) or {}),
+            )
+            if self._dedup is not None and self._dedup.is_duplicate(stored):
+                self._bump("dedup_skipped")
+                log.debug("dedup skip: %s", request.url)
+                return
+            is_new = store.put(stored)
+            if self._dedup is not None:
+                self._dedup.mark_seen(stored)
+            self._bump("stored_new" if is_new else "stored_updated")
+        except Exception as exc:
+            log.warning("store failed for %s: %s: %s", request.url, type(exc).__name__, exc)
+
+    def _extract_item(self, request: Request, response: Response) -> Optional[dict]:
+        """The spider's ``extract_item`` hook if it has one, else a conservative preview.
+
+        The default is deliberately dumb — url, status, headers, first 4KB — because the
+        real schema belongs to the spider, which already owns ``parse``.
+        """
+        hook = getattr(self.spider, "extract_item", None)
+        if callable(hook):
+            return hook(request, response)
+        body = getattr(response, "body", None)
+        if not body:
+            return None
+        return {
+            "url": request.url,
+            "status": response.status,
+            "headers": dict(response.headers or {}),
+            "body_preview": body[:4096].decode("utf-8", errors="replace"),
+        }
 
     def _apply_incremental(self, cache: Any, url: str, request: Request, response: Response) -> Response:
         """Serve a 304 / byte-identical 200 from the cache; refresh the entry on a real 200.
@@ -526,17 +586,21 @@ class CrawlerEngine:
                 # server's response rather than inventing a body.
                 return response
             cached.request = request
-            self._bump_custom("incremental_hits")
+            self._bump("incremental_hits")
             log.debug("incremental: %s served from cache (status %s)", url, status)
             return cached
 
         if status == 200:
             cache.put(url, response)
-            self._bump_custom("incremental_misses")
+            self._bump("incremental_misses")
         return response
 
-    def _bump_custom(self, key: str, by: int = 1) -> None:
-        """CrawlStats has no incremental fields yet; custom_stats keeps result.py untouched."""
+    def _bump(self, key: str, by: int = 1) -> None:
+        """Increment a CrawlStats field when it exists, else a custom counter."""
+        current = getattr(self.stats, key, None)
+        if isinstance(current, int):
+            setattr(self.stats, key, current + by)
+            return
         counters = self.stats.custom_stats
         counters[key] = counters.get(key, 0) + by
 

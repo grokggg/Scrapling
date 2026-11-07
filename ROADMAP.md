@@ -20,6 +20,6 @@
 - [x] P6 pacing
 - [x] P7 render pool
 - [x] P8 incremental
-- [x] P9 storage
+- [x] P9 storage + engine hook
 - [ ] P10 telemetry
 - [ ] P11 distributed
