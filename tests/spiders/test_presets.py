@@ -277,3 +277,20 @@ class TestAptFallback:
 
         assert Probe().browser_fallback_to_static is True
         assert Spider.browser_fallback_to_static is True
+
+
+class TestIncrementalPresets:
+    def test_the_apt_spider_ships_with_the_aggressive_cache(self):
+        from scrapling.spiders.presets import APT_INCREMENTAL, ENGINEERING_INCREMENTAL, make_apt_spider
+        from scrapling.spiders.spider import Spider
+
+        class Probe(make_apt_spider(Spider)):
+            name = "apt_incremental_probe"
+
+            async def parse(self, response):
+                yield None
+
+        assert Probe().incremental_cache is APT_INCREMENTAL
+        assert APT_INCREMENTAL._ttl == 3600
+        assert ENGINEERING_INCREMENTAL._ttl == 86400
+        assert Spider.incremental_cache is None

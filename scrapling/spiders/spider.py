@@ -26,6 +26,7 @@ BLOCKED_CODES = {401, 403, 407, 444}
 
 if TYPE_CHECKING:
     from scrapling.spiders.adaptive import AdaptiveConfig
+    from scrapling.spiders.incremental import IncrementalCache
     from scrapling.engines.toolbelt.custom import Response
 
 
@@ -100,6 +101,8 @@ class Spider(ABC):
 
     # Request rhythm. None = pacing off (zero overhead); set a PacingConfig to opt in.
     pacing_config: Optional["PacingConfig"] = None
+    #: 增量抓取。None = 每次都重新下载；给一个 cache 则按 ETag/Last-Modified 做条件请求。
+    incremental_cache: Optional["IncrementalCache"] = None
 
     # BROWSER rung knobs. Defaults mirror the upstream validator defaults, so a spider that
     # sets none of them behaves exactly as before.

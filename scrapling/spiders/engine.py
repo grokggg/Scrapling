@@ -322,6 +322,18 @@ class CrawlerEngine:
                 if proxy_url is not None:
                     request._session_kwargs["proxy"] = proxy_url
 
+        # P8: ask the origin only for what changed. Conditional headers lose to any the
+        # caller already set, and a request with a body is never a cache lookup.
+        cache = getattr(self.spider, "incremental_cache", None)
+        cache_key = request.url if cache is not None and request._session_kwargs.get("method", "GET") == "GET" else None
+        if cache_key is not None:
+            conditional = cache.conditional_headers(cache_key)
+            if conditional:
+                request._session_kwargs["headers"] = {
+                    **conditional,
+                    **request._session_kwargs.get("headers", {}),
+                }
+
         async with self._rate_limiter(request.domain):
             if self._autothrottle:
                 delay = self._autothrottle.delay_for(request.domain, floor)
@@ -341,6 +353,11 @@ class CrawlerEngine:
                 started_at = anyio.current_time()
                 response = await self.session_manager.fetch(request)
                 latency = anyio.current_time() - started_at
+
+                # Before signals, stats or callbacks: a 304 carries no body, so letting it
+                # through would read as an EMPTY signal and escalate the ladder on every hit.
+                if cache_key is not None:
+                    response = self._apply_incremental(cache, cache_key, request, response)
 
                 if proxy_url is not None:
                     self._proxy_pool.release(
@@ -494,6 +511,34 @@ class CrawlerEngine:
             await self._cache_manager.put(request._fp, response, request._session_kwargs.get("method", "GET"))
 
         await self._run_callbacks(request, response)
+
+    def _apply_incremental(self, cache: Any, url: str, request: Request, response: Response) -> Response:
+        """Serve a 304 / byte-identical 200 from the cache; refresh the entry on a real 200.
+
+        Returns the response the rest of the pipeline should see. Whatever happens here, the
+        caller keeps its normal flow — a cache hit is a success, not a shortcut.
+        """
+        status = getattr(response, "status", None)
+        if status == 304 or (status == 200 and cache.is_not_modified(response)):
+            cached = cache.build_response_from_cache(url)
+            if cached is None:
+                # Expired between the conditional request and the answer: fall back to the
+                # server's response rather than inventing a body.
+                return response
+            cached.request = request
+            self._bump_custom("incremental_hits")
+            log.debug("incremental: %s served from cache (status %s)", url, status)
+            return cached
+
+        if status == 200:
+            cache.put(url, response)
+            self._bump_custom("incremental_misses")
+        return response
+
+    def _bump_custom(self, key: str, by: int = 1) -> None:
+        """CrawlStats has no incremental fields yet; custom_stats keeps result.py untouched."""
+        counters = self.stats.custom_stats
+        counters[key] = counters.get(key, 0) + by
 
     async def _task_wrapper(self, request: Request) -> None:
         """Wrapper to track active task count."""

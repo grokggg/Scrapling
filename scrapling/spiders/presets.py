@@ -11,15 +11,23 @@ pages) so a single good response cannot drag you back into a wall you already hi
 from __future__ import annotations
 
 from scrapling.spiders.adaptive import AdaptiveConfig
+from scrapling.spiders.incremental import IncrementalCache
+from scrapling.spiders.incremental_storage import MemoryStorage
 from scrapling.spiders.pacing import PacingConfig
 
 __all__ = [
+    "APT_INCREMENTAL",
     "APT_PACING",
     "APT_PRESET",
+    "ENGINEERING_INCREMENTAL",
     "ENGINEERING_PACING",
     "ENGINEERING_PRESET",
     "make_apt_spider",
 ]
+
+# 增量抓取默认值。工程档按日缓存（内容变动慢、宁稳），APT 档按小时（抢时效）。
+ENGINEERING_INCREMENTAL = IncrementalCache(storage=MemoryStorage(), ttl_seconds=86400)
+APT_INCREMENTAL = IncrementalCache(storage=MemoryStorage(), ttl_seconds=3600)  # 1h，激进增量
 
 # 工程保守档
 ENGINEERING_PRESET = AdaptiveConfig(
@@ -110,6 +118,8 @@ def make_apt_spider(base_class):
         browser_resource_profile = "speed"  # 速度档，不再一刀切
         browser_block_analytics = True
         browser_fallback_to_static = True  # 渲染失败当场降档 TLS，BROWSER 挂不再等于 URL 丢
+
+        incremental_cache = APT_INCREMENTAL  # 1h TTL，激进增量
 
         # 代理池按需注入（proxy_pool 仍为 None），但池策略更激进
         proxy_pool_config = ProxyPoolConfig(
